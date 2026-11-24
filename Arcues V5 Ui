@@ -1,3 +1,7 @@
+--[[
+	the original creator is megacatcreators on discord 
+]]
+
 local Players = game:GetService("Players")
 local TweenService = game:GetService("TweenService")
 local RunService = game:GetService("RunService")
@@ -2960,7 +2964,8 @@ local A = {
 -- LOOK SETTINGS (tweak these)
 ----------------------------------------------------------------
 local BG_BASE_COLOR = Color3.fromRGB(10, 10, 10) -- dark base behind the window art
-local BG_BASE_TRANSPARENCY = 0.3 -- window background transparency (0 = solid black, 1 = invisible)
+local BG_BASE_TRANSPARENCY = 0.3 -- background transparency of the extension windows (0 = solid black, 1 = invisible)
+Theme.MainBgTransparency = 0.29 -- background transparency of the MAIN window (MainFrame). Roblox only accepts 0..1 (0 = solid, 1 = invisible)
 local BG_TINT = Color3.fromRGB(0, 0, 0) -- glow image color (black, same as the source) - makes the glow dark
 local BG_IMAGE_TRANSPARENCY = 0.3 -- window texture transparency, drawn on top of the dark base (0 = solid, 1 = invisible)
 local PANEL_COLOR = Color3.fromRGB(18, 18, 18) -- glass panels (Welcome / Best Scripts)
@@ -3453,7 +3458,7 @@ local main = new("Frame", {
 	Position = UDim2.fromScale(0.5, 0.5),
 	Size = SIZES[START_SIZE],
 	BackgroundColor3 = BG_BASE_COLOR,
-	BackgroundTransparency = BG_BASE_TRANSPARENCY, -- dark base like the reference
+	BackgroundTransparency = Theme.MainBgTransparency, -- dark base like the reference
 	BorderSizePixel = 0,
 	Active = true,
 	ClipsDescendants = true,
@@ -3744,7 +3749,7 @@ local sidebarShade = new("Frame", {
 task.delay(4, function()
 	if alive and windowState == "open" and not main.Visible then
 		main.Visible = true
-		main.BackgroundTransparency = BG_BASE_TRANSPARENCY
+		main.BackgroundTransparency = Theme.MainBgTransparency
 		bgImage.ImageTransparency = BG_IMAGE_TRANSPARENCY
 		popScale.Scale = 1
 	end
@@ -3904,7 +3909,7 @@ local function openWindow(tabName)
 	main.BackgroundTransparency = 1
 	bgImage.ImageTransparency = 1
 	main.Visible = true
-	tween(main, 0.3, { BackgroundTransparency = BG_BASE_TRANSPARENCY })
+	tween(main, 0.3, { BackgroundTransparency = Theme.MainBgTransparency })
 	tween(bgImage, 0.3, { ImageTransparency = BG_IMAGE_TRANSPARENCY })
 	tween(popScale, 0.5, { Scale = 1 }, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
 	task.delay(0.55, function()
@@ -18213,26 +18218,37 @@ do
 				FX.play(starImage.Pop, 0.5, { Scale = 1 }, Enum.EasingStyle.Back)
 				return
 			end
-			FX.busy = true
-			task.delay(1.2, function() -- safety: never leave the button locked
-				FX.busy = false
-			end)
-			trashFx.flash(TILE_FLASH.red, 1)
-			FX.wiggle(trashIcon)
-			local at = table.find(items, item) or #items
-			local neighbour = neighbourOf(item)
-			removeRow(item, function()
-				local index = table.find(items, item)
-				if index then
-					table.remove(items, index)
-				end
-				if #items == 0 then
-					nextNumber = nextNumber + 1
-					table.insert(items, { name = "Script n." .. nextNumber, source = "", fav = false, autorun = false })
-				end
-				selectItem(neighbour or items[math.min(at, #items)], true)
-				FX.busy = false
-			end)
+			-- PERMISSION FIRST (same Confirm toast as the Clear button): Confirm deletes the file, tapping anywhere else closes the toast and keeps it
+			showToast({
+				style = "confirm",
+				title = "Delete",
+				text = "Delete " .. tostring(item.name or "this script") .. "?",
+				onConfirm = function()
+					if FX.busy or not table.find(items, item) then -- busy, or the file is already gone
+						return
+					end
+					FX.busy = true
+					task.delay(1.2, function() -- safety: never leave the button locked
+						FX.busy = false
+					end)
+					trashFx.flash(TILE_FLASH.red, 1)
+					FX.wiggle(trashIcon)
+					local at = table.find(items, item) or #items
+					local neighbour = neighbourOf(item)
+					removeRow(item, function()
+						local index = table.find(items, item)
+						if index then
+							table.remove(items, index)
+						end
+						if #items == 0 then
+							nextNumber = nextNumber + 1
+							table.insert(items, { name = "Script n." .. nextNumber, source = "", fav = false, autorun = false })
+						end
+						selectItem(neighbour or items[math.min(at, #items)], true)
+						FX.busy = false
+					end)
+				end,
+			})
 		end
 
 		-- bottom category buttons: Files / Favourites / Auto (the selected one expands to a pill, no animation)
@@ -18859,7 +18875,7 @@ do
 		main.BackgroundTransparency = 1
 		bgImage.ImageTransparency = 1
 		main.Visible = true
-		tween(main, 0.3, { BackgroundTransparency = BG_BASE_TRANSPARENCY })
+		tween(main, 0.3, { BackgroundTransparency = Theme.MainBgTransparency })
 		tween(bgImage, 0.3, { ImageTransparency = BG_IMAGE_TRANSPARENCY })
 		TweenService:Create(popScale, TweenInfo.new(0.55, BACK, OUT), { Scale = 1 }):Play()
 		TweenService:Create(sidebar, TweenInfo.new(0.5, BACK, OUT, 0, false, 0.1), { Position = sidebarFinal }):Play()
@@ -18884,7 +18900,7 @@ do
 				"the window is shown without the animation"
 			)
 			main.Visible = true
-			main.BackgroundTransparency = BG_BASE_TRANSPARENCY
+			main.BackgroundTransparency = Theme.MainBgTransparency
 			bgImage.ImageTransparency = BG_IMAGE_TRANSPARENCY
 			popScale.Scale = 1
 		end
@@ -18919,3 +18935,4 @@ task.spawn(function()
 		)
 	end
 end)
+ 

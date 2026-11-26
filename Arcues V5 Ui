@@ -1,7 +1,3 @@
---[[
-	the original creator is megacatcreators on discord 
-]]
-
 local Players = game:GetService("Players")
 local TweenService = game:GetService("TweenService")
 local RunService = game:GetService("RunService")
@@ -36,6 +32,9 @@ local function loadAvatar(target, thumbType, directType, stillWanted)
 	end)
 end
 
+-- Start-up block: everything the license / loading screen needs lives in this do-block, so its ~25 helper locals are freed afterwards
+-- (the script is close to the limit of 200 local variables per function; going over it stops the whole script from loading).
+do
 --------------------------------------------------------------------------------
 -- Defaults (override per screen via LoadingScreen.new({ ... }))
 --------------------------------------------------------------------------------
@@ -138,8 +137,20 @@ end
 --------------------------------------------------------------------------------
 -- Glow A: EditableImage (matches the source pixel-for-pixel)
 --------------------------------------------------------------------------------
-local function createEditableGlow(container, glowW, glowH)
+-- opts (optional) = the settings of ANOTHER glow of the source, same names as the source's `settings` table (InnerGlowRadius, GlowSoftnessExponent, GlowExtraAlpha,
+-- BackgroundAlpha, GlowPulseAmplitude, GlowPulseFrequency, LeftGlowBoost, CornerRadiusRatio) + ZIndex. Without opts it is the loading screen's glow (BackgroundOverlay).
+-- The LICENSE screen passes the StartingScreen's settings (see LoadingScreen.LICENSE.Glow): a wide dark glow that is boosted on the LEFT half.
+local function createEditableGlow(container, glowW, glowH, opts)
 	local GLOW_W, GLOW_H = glowW or GLOW_W, glowH or GLOW_H -- this glow's own resolution (the loading / licence screen asks for a finer one)
+	opts = opts or {}
+	local CORNER_RATIO = opts.CornerRadiusRatio or CORNER_RADIUS_RATIO
+	local GLOW_RADIUS = opts.InnerGlowRadius or INNER_GLOW_RADIUS
+	local EXPONENT = opts.GlowSoftnessExponent or GLOW_EXPONENT
+	local EXTRA_ALPHA = opts.GlowExtraAlpha or GLOW_EXTRA_ALPHA
+	local BG_ALPHA = opts.BackgroundAlpha or BACKGROUND_ALPHA
+	local PULSE_AMP = opts.GlowPulseAmplitude or PULSE_AMPLITUDE
+	local PULSE_FREQ = opts.GlowPulseFrequency or PULSE_FREQUENCY
+	local LEFT_BOOST = opts.LeftGlowBoost or 1 -- source: multiplier of the glow radius on the left half (1 = none, 5 = five times as wide at the left edge)
 	local ok, editable = pcall(function()
 		return AssetService:CreateEditableImage({ Size = Vector2.new(GLOW_W, GLOW_H) })
 	end)
@@ -155,6 +166,9 @@ local function createEditableGlow(container, glowW, glowH)
 	image.Position = UDim2.fromScale(0.5, 0.5)
 	image.Size = UDim2.fromScale(1, 1)
 	image.ScaleType = Enum.ScaleType.Stretch
+	if opts.ZIndex then
+		image.ZIndex = opts.ZIndex
+	end
 
 	local okSet = pcall(function()
 		image.ImageContent = Content.fromObject(editable)
@@ -167,15 +181,15 @@ local function createEditableGlow(container, glowW, glowH)
 	image.Parent = container
 
 	-- Per-pixel values that never change between frames are computed once.
-	local cornerRadius = math.min(GLOW_W, GLOW_H) * CORNER_RADIUS_RATIO
-	local glowRadius = INNER_GLOW_RADIUS * (math.min(GLOW_W, GLOW_H) / 128)
+	local cornerRadius = math.min(GLOW_W, GLOW_H) * CORNER_RATIO
+	local glowRadius = GLOW_RADIUS * (math.min(GLOW_W, GLOW_H) / 128)
 	local rx = math.max(GLOW_W / 2 - cornerRadius, 0)
 	local ry = math.max(GLOW_H / 2 - cornerRadius, 0)
-	local pulseMax = 1 + PULSE_AMPLITUDE * 2.6 -- room for the brighter flash (boost) when the licence is accepted
+	local pulseMax = 1 + PULSE_AMP * 2.6 -- room for the brighter flash (boost) when the licence is accepted
 
 	local size = Vector2.new(GLOW_W, GLOW_H)
 	local buf = buffer.create(GLOW_W * GLOW_H * 4)
-	local interior = math.floor(BACKGROUND_ALPHA + 0.5) * 16777216 -- rgb 0, alpha ~50%
+	local interior = math.floor(BG_ALPHA + 0.5) * 16777216 -- rgb 0, alpha = BackgroundAlpha (loading glow ~50%, licence glow ~75%)
 
 	local offsets, bases, angles = {}, {}, {}
 	local count = 0
@@ -190,11 +204,16 @@ local function createEditableGlow(container, glowW, glowH)
 			local inside = math.min(math.max(dx, dy), 0)
 			local d = math.abs(outside + inside - cornerRadius)
 
-			local factor = 0
-			if d < glowRadius then
-				factor = 1 - d / glowRadius
+			-- source: on the left half the glow radius grows towards the left edge (LeftGlowBoost), x is the pixel column
+			local radius = glowRadius
+			if LEFT_BOOST > 0 and x < GLOW_W / 2 then
+				radius = glowRadius * (1 + (LEFT_BOOST - 1) * (1 - x / (GLOW_W / 2)))
 			end
-			local base = factor ^ GLOW_EXPONENT
+			local factor = 0
+			if d < radius then
+				factor = 1 - d / radius
+			end
+			local base = factor ^ EXPONENT
 			local offset = (y * GLOW_W + x) * 4
 
 			buffer.writeu32(buf, offset, interior)
@@ -211,12 +230,12 @@ local function createEditableGlow(container, glowW, glowH)
 	local floor = math.floor
 	local writeu32 = buffer.writeu32
 
-	local glow = {}
+	local glow = { Image = image }
 
 	-- phase: 0..1 over one GlowCycle (the colour swirl); breath: 0..1 over one GlowBreath (the brightness pulse); boost: 0..1 = extra pulse strength
 	function glow.Update(phase, breath, boost)
-		local amp = PULSE_AMPLITUDE * (1 + (boost or 0) * 1.6)
-		local pulse = 1 + amp * math.sin(PULSE_FREQUENCY * (breath or phase) * TWO_PI)
+		local amp = PULSE_AMP * (1 + (boost or 0) * 1.6)
+		local pulse = 1 + amp * math.sin(PULSE_FREQ * (breath or phase) * TWO_PI)
 		for k = 1, count do
 			local fade = bases[k] * pulse
 			if fade > 1 then
@@ -226,7 +245,7 @@ local function createEditableGlow(container, glowW, glowH)
 			local r = floor(lutR[idx] * fade + 0.5)
 			local g = floor(lutG[idx] * fade + 0.5)
 			local b = floor(lutB[idx] * fade + 0.5)
-			local a = floor(BACKGROUND_ALPHA + fade * GLOW_EXTRA_ALPHA + 0.5)
+			local a = floor(BG_ALPHA + fade * EXTRA_ALPHA + 0.5)
 			if a > 255 then
 				a = 255
 			end
@@ -473,6 +492,12 @@ function LoadingScreen.new(config)
 			lastGlow = now
 			local clock = now - t0
 			self._glow.Update((clock % cfg.GlowCycle) / cfg.GlowCycle, (clock % cfg.GlowBreath) / cfg.GlowBreath, boost)
+			-- the license screen's own glow (source: StartingScreen): ONE 4 s loop drives both the colour swirl and the slow swell, like the source's Duration = 4
+			local licGlow = self._licGlow
+			if licGlow then
+				local loop = (clock % 4) / 4
+				licGlow.Update(loop, loop, boost)
+			end
 			-- self-tuning redraw rate: a slow redraw (weak phone) lowers the rate, a fast one brings it back up
 			local cost = os.clock() - now
 			if cost > 0.012 then
@@ -629,6 +654,10 @@ function LoadingScreen:Destroy()
 	if self._glow then
 		self._glow.Destroy()
 	end
+	if self._licGlow then
+		self._licGlow.Destroy()
+		self._licGlow = nil
+	end
 	if self._gui then
 		self._gui:Destroy()
 	end
@@ -657,12 +686,12 @@ LoadingScreen.LICENSE = {
 	Welcome = "Welcome to",
 	Text = "Explore new possibilities,\ntake control, and unlock the\npower to dominate.",
 	Placeholder = "Email",
-	Allowed = { "Test@gmail.com", "Arcy@gmail.com" }, -- the emails the licence accepts (nil = any well-formed email)
+	Allowed = { "Test@gmail.com", "Arcy@gmail.com", "ArcyInfo@gmail.com" }, -- the emails the licence accepts (nil = any well-formed email)
 	Private = { -- PRIVATE emails: nobody can change their license end (see PRIVATE EMAILS below). Days = length from the first START; Trial = true shows the free trial text
 		["Test@gmail.com"] = { Days = 30 },
 		["Arcy@gmail.com"] = { Days = 7, Trial = true }, -- FREE TRIAL: 7 days from the first START
 	},
-	Days = {}, -- how many days an email's license lasts after its first START for the emails that are NOT private ({ ["name@mail.com"] = 30 }, not case sensitive)
+	Days = { ["ArcyInfo@gmail.com"] = 0 }, -- how many days an email's license lasts after its first START for the emails that are NOT private ({ ["name@mail.com"] = 30 }, not case sensitive). 0 = INFINITE: ArcyInfo@gmail.com never expires
 	DefaultDays = 30, -- the length for an email that has no entry in Days (0 or less = never ends)
 	AutoSave = true, -- true = the accepted license is saved with its end day and the license screen is skipped until it ends; false = the screen shows (see RememberHours)
 	ExpiredText = "Your license expired on %s.", -- shown when the license has ended (%s = the day, YYYY-MM-DD)
@@ -671,6 +700,22 @@ LoadingScreen.LICENSE = {
 	DeniedText = "This email has no license.", -- shown when the email is not in Allowed
 	PromptTitle = "Instant code with Arcy", -- the title of the search bar that opens when the Email box is tapped
 	PromptHint = "Email...", -- its hint text (the Arcy orb's prompt says "Walkspeed script...")
+	-- The license screen's OWN glow. Source: the StartingScreen's "UI STARTING SCREEN BACKGROUND ANIMATION" (not the loading screen's "INIT BACKGROUND ANIMATION"),
+	-- all numbers copied from its `settings` table: a wide, soft, dark glow (75% background) that is boosted on the LEFT half (LeftGlowBoost = 5: five times as wide
+	-- at the left edge, fading back to 1x at the middle) so the left side - where the avatar, texts and buttons are - is the glowing / dark side. 4 s colour swirl.
+	Glow = {
+		Enabled = true, -- false = the license screen sits on the loading screen's glow like before
+		InnerGlowRadius = 3555, -- source value (in 128 px base units)
+		GlowSoftnessExponent = 150, -- source value
+		GlowExtraAlpha = 20, -- source value
+		BackgroundAlpha = 0.75 * 255, -- source value: the dark base under the glow
+		GlowPulseAmplitude = 0.5, -- source value
+		GlowPulseFrequency = 0.5, -- source value (half a wave per 4 s swirl = one slow swell)
+		LeftGlowBoost = 5, -- source value; 1 = no boost (even all around), bigger = the left glow reaches further
+		CornerRadiusRatio = 0.035, -- source value
+		Width = 128, -- the source's own glow resolution (every pixel of this glow is active, so a finer one would cost a lot more per frame)
+		Height = 72,
+	},
 	MaxAspect = 2.1, -- the layout stage is as wide as the screen up to this width / height ratio (16:9 is the minimum)
 	StartText = "START",
 	SubscribeText = "SUBSCRIBE",
@@ -1110,6 +1155,23 @@ do
 		local sw, sh = screenSize()
 		local pad = math.max(4, math.floor(math.min(sh, sw / stageAspect()) / 90)) -- source: "padding"
 		local height = sh
+
+		-- the license screen's own glow (source: StartingScreen): full screen, above the loading glow (ZIndex 1) and under the layout (500). It is outside `root`
+		-- on purpose: root keeps the 16:9..MaxAspect stage, the glow always fills the whole screen like the source's full-size StartingScreen image.
+		local licGlow = nil
+		local licGlowCfg = L.Glow
+		if type(licGlowCfg) == "table" and licGlowCfg.Enabled ~= false then
+			local opts = {}
+			for k, v in pairs(licGlowCfg) do
+				opts[k] = v
+			end
+			opts.ZIndex = 499
+			licGlow = createEditableGlow(gui, tonumber(licGlowCfg.Width) or 128, tonumber(licGlowCfg.Height) or 72, opts) -- nil without EditableImage: the loading glow stays
+			if licGlow then
+				self._licGlow = licGlow
+				licGlow.FadeTo(TweenInfo.new(0.8, Enum.EasingStyle.Sine, Enum.EasingDirection.Out), 0)
+			end
+		end
 
 		local root = Instance.new("Frame")
 		root.Name = "StartingScreen"
@@ -1715,10 +1777,20 @@ do
 		box.PlaceholderText = ""
 		fade(false, 0.5)
 		tween(message, TweenInfo.new(0.4), { TextTransparency = 1 })
+		if licGlow then
+			licGlow.FadeTo(TweenInfo.new(0.6, Enum.EasingStyle.Sine, Enum.EasingDirection.In), 1) -- the loading glow underneath shows again
+		end
 		task.wait(0.7)
 		stageConn:Disconnect()
 		self._art = nil
 		root:Destroy()
+		if licGlow then
+			self._licGlow = nil
+			licGlow.Destroy()
+			if licGlow.Image then
+				licGlow.Image:Destroy()
+			end
+		end
 		return true
 	end
 end
@@ -1750,11 +1822,33 @@ if PREVIEW then
 		until not screen:IsCoolingDown() or screen._destroyed
 	end
 end
+end -- (closes the start-up block: its ~25 helper locals no longer count against the 200-local limit)
 
 -- (removed: a top-level return here stopped the rest of the script from compiling)
 
 local Players = game:GetService("Players")
-local TweenService = game:GetService("TweenService")
+local RealTweenService = game:GetService("TweenService")
+-- every GuiObject that a LOOPING tween drives (a glow that breathes, a pulse ...) is remembered here, so the page cascade (source: AnimateCascade)
+-- leaves those alone and never cancels their loop. Everything else behaves exactly like the real TweenService.
+local LoopDriven = setmetatable({}, { __mode = "k" })
+local TweenService = setmetatable({
+	Create = function(_, inst, info, goal)
+		if typeof(info) == "TweenInfo" and info.RepeatCount ~= 0 then
+			LoopDriven[inst] = true
+		end
+		return RealTweenService:Create(inst, info, goal)
+	end,
+}, {
+	__index = function(_, key)
+		local value = RealTweenService[key]
+		if type(value) == "function" then
+			return function(_, ...)
+				return value(RealTweenService, ...)
+			end
+		end
+		return value
+	end,
+})
 local UserInputService = game:GetService("UserInputService")
 local ContentProvider = game:GetService("ContentProvider")
 
@@ -1840,13 +1934,26 @@ function Sys.run(name, source, opts)
 	if not ls then
 		return Sys.fail(name, "Cannot run " .. tostring(name) .. " | Likely cause: loadstring does not exist here (normal Roblox clients block it) | Fix: run this from an executor that provides loadstring", "loadstring is not available in this environment", quiet, "noload")
 	end
-	local called, fn, err = pcall(ls, source, "=" .. tostring(name or "script"))
-	if not called then
-		-- some loadstring versions reject the chunk name or throw: try again with the source only
-		called, fn, err = pcall(ls, source)
-		if not called then
-			return Sys.fail(name, "loadstring failed for " .. tostring(name) .. ": " .. tostring(fn), "loadstring failed: " .. string.sub(tostring(fn), 1, 90), quiet, "syntax")
+	-- the chunk name is only a label: ScriptBlox titles can hold emoji, new lines or be very long, and some executors reject those
+	local chunk = string.gsub(tostring(name or "script"), "[^%w _%-%.]", "")
+	chunk = string.sub(chunk, 1, 50)
+	if not string.find(chunk, "%S") then
+		chunk = "script"
+	end
+	local called, fn, err = pcall(ls, source, "=" .. chunk)
+	if not called or type(fn) ~= "function" then
+		-- some loadstring versions reject the chunk name (they throw, or they answer nil + a message): try again with the source only
+		local called2, fn2, err2 = pcall(ls, source)
+		if called2 and type(fn2) == "function" then
+			called, fn, err = true, fn2, err2
+		elseif called2 then
+			called, fn, err = true, nil, err2 or err -- a real syntax error: keep its message
+		elseif not called then
+			called, fn = false, fn2 -- both tries threw: loadstring itself is blocked here
 		end
+	end
+	if not called then
+		return Sys.fail(name, "loadstring failed for " .. tostring(name) .. ": " .. tostring(fn), "loadstring failed: " .. string.sub(tostring(fn), 1, 90), quiet, "syntax")
 	end
 	if type(fn) ~= "function" then
 		return Sys.fail(name, "Syntax error in " .. tostring(name) .. ": " .. tostring(err), "Syntax error: " .. string.sub(tostring(err), 1, 90), quiet, "syntax")
@@ -1915,6 +2022,20 @@ function Sys.openConsole()
 	end
 end
 
+-- source (EditorConsoleButton): StarterGui:SetCore("DevConsoleVisible", not StarterGui:GetCore("DevConsoleVisible")) - the console button opens the
+-- Roblox developer console, a second tap closes it
+function Sys.toggleConsole()
+	local okGet, visible = pcall(function()
+		return StarterGui:GetCore("DevConsoleVisible")
+	end)
+	local ok = pcall(function()
+		StarterGui:SetCore("DevConsoleVisible", not (okGet and visible == true))
+	end)
+	if not ok then
+		sysWarn("Console could not open", "SetCore DevConsoleVisible failed", "try again in a moment")
+	end
+end
+
 function Sys.copy(text)
 	Sys.clipboard = text
 	local ok, fn = pcall(function()
@@ -1974,6 +2095,8 @@ ArcyAI = {
 		EditorContextChars = 14000,
 		ShareServerPlayers = true, -- false = the AI only knows YOUR name, not the other players in the server
 		MaxPlayersListed = 30,
+		-- USAGE LIMIT: how many AI requests you can send. Local commands (Cmds, "open settings") are free and never count.
+		UsageLimit = { Enabled = true, MaxRequests = 30, WindowSeconds = 3600, MinGapSeconds = 1.5 }, -- 30 requests per hour, at least 1.5 s apart. Enabled = false turns it off
 		-- The one AI: pollinations.ai. It works with no API key.
 		pollinations = {
 			Name = "pollinations.ai",
@@ -2414,6 +2537,33 @@ function ArcyAI.ExtractCode(answer)
 	return code
 end
 
+-- The words of an answer WITHOUT its code block. The source's AI gives them apart (res.texts[1] = the words, res.codes[1] = the code); this AI gives one string with the
+-- code inside --[[ ... ]], so the words are what is left when that block (first --[[ to last ]], the same span ExtractCode takes) is cut out.
+function ArcyAI.ExtractProse(answer)
+	if type(answer) ~= "string" then
+		return ""
+	end
+	local openAt = string.find(answer, "--[[", 1, true)
+	if not openAt then
+		return aiTrim(answer)
+	end
+	local closeAt, from = nil, openAt + 4
+	while true do
+		local found = string.find(answer, "]]", from, true)
+		if not found then
+			break
+		end
+		closeAt = found
+		from = found + 1
+	end
+	local before = aiTrim(string.sub(answer, 1, openAt - 1))
+	local after = closeAt and aiTrim(string.sub(answer, closeAt + 2)) or ""
+	if before ~= "" and after ~= "" then
+		return before .. "\n\n" .. after
+	end
+	return before .. after
+end
+
 -- ----------------------------------------------------------------
 -- CHAT COMMANDS: Cmds / Open <tab>
 -- ----------------------------------------------------------------
@@ -2447,6 +2597,35 @@ function ArcyAI.CommandsText()
 end
 
 -- Returns { text, code }, error, provider. Chat histories remain separate.
+ArcyAI.Usage = { stamps = {}, last = -math.huge }
+function ArcyAI.UsageCheck() -- true = allowed (and counted); false, message = blocked
+	local cfg = ArcyAI.Config.UsageLimit
+	if type(cfg) ~= "table" or cfg.Enabled == false then
+		return true
+	end
+	local now = os.clock()
+	local window = math.max(1, tonumber(cfg.WindowSeconds) or 3600)
+	local maxCount = math.max(1, math.floor(tonumber(cfg.MaxRequests) or 30))
+	local gap = tonumber(cfg.MinGapSeconds) or 0
+	local keep = {}
+	for _, t in ipairs(ArcyAI.Usage.stamps) do
+		if now - t < window then
+			keep[#keep + 1] = t
+		end
+	end
+	ArcyAI.Usage.stamps = keep
+	if gap > 0 and now - ArcyAI.Usage.last < gap then
+		return false, "Slow down - wait a moment before the next question."
+	end
+	if #keep >= maxCount then
+		local left = math.max(1, math.ceil(window - (now - keep[1])))
+		return false, string.format("Usage limit reached (%d requests per %d min). Try again in %dm %02ds.", maxCount, math.floor(window / 60), math.floor(left / 60), left % 60)
+	end
+	keep[#keep + 1] = now
+	ArcyAI.Usage.last = now
+	return true
+end
+
 function ArcyAI.Ask(prompt, context, editorSource)
 	prompt = aiTrim(prompt)
 	context = context == "Editor" and "Editor" or "Intelligence"
@@ -2465,6 +2644,11 @@ function ArcyAI.Ask(prompt, context, editorSource)
 	if quickTab then
 		local quick = { { type = "open", tab = quickTab } }
 		return { text = ArcyAI.ActionText(quick), actions = quick }, nil, "local"
+	end
+
+	local allowed, limitMsg = ArcyAI.UsageCheck()
+	if not allowed then
+		return nil, limitMsg
 	end
 
 	local provider = ArcyAI.Provider
@@ -2508,7 +2692,7 @@ local Hooks = {
 	OnOpen = function(tabName) end, -- the window was reopened from the floating button (tabName is set if you tapped a tab icon)
 	OnRun = function(name, source, opts) return Sys.run(name, source, opts) end, -- play button on the Editor page and Execute on the script card (this script itself runs nothing). Return false to say it failed
 	OnSave = function(name, source, path) if path then return Sys.saveTo(path, source) end return Sys.save(name, source) end, -- save button on the Editor page (it asks for permission first). path = the file the tab was opened from (nil = ArcyScripts/<name>.lua). Return false to say it failed
-	OnConsole = function() Sys.openConsole() end, -- green console button on the Editor page
+	OnConsole = function() Sys.toggleConsole() end, -- green console button on the Editor page (like the source it toggles the Roblox developer console: tap = open, tap again = close)
 	OnTranslate = function(code, index) end, -- Intelligence page: a language was confirmed with Translate (code = "EN" | "IT" | "VI" | "PT" | "ID" | "RU" | "DE" | "ES" | "FR" | "ZH" | "JA" | "AR" | "HI" | "TH", index = 1..14). The Intelligence page translates itself; translate your other pages here
 	OnChat = function(prompt)
 		local result, err = ArcyAI.Ask(prompt, "Intelligence")
@@ -2518,7 +2702,7 @@ local Hooks = {
 		return { text = "Arcy could not answer right now. " .. tostring(err or "Please try again.") }
 	end, -- Intelligence page: the text typed in the "Teach me how to..." box. Return the answer as a string, or { text = "...", code = "..." } (code asks "Allow Arcy to execute?" and Confirm goes to Hooks.OnRun). Return nothing and the built-in answers (walk speed / jump power / gravity) are used
 	OnSong = function(id, info) end, -- Intelligence page: a new song id started playing in the music player (info = the audio asset's product info)
-	OnAI = function(prompt) end, -- "Instant code with Arcy": the Arcy orb on the Editor page was tapped and this text was typed (never empty)
+	OnAI = function(prompt) end, -- "Instant code with Arcy": the Arcy orb on the Editor page was tapped and this text was typed (never empty). The built-in answer opens a new "AI Script" file in the Editor (like the source)
 	OnCategory = function(key) end, -- Files / Favs / Auto buttons under the file list ("files" | "star" | "run")
 	OnAutoExecute = function() end, -- a file was held to switch auto-execute on / off (it moves to / from the Auto tab)
 	OnFavorite = function(name, favourite) end, -- the star tile favourited / unfavourited the selected file
@@ -2683,7 +2867,14 @@ local function themeShades(name, c)
 end
 
 local function themeState(entry)
-	return { name = entry.Name, color = entry.Color, dim = themeDim(entry.Color), sh = themeShades(entry.Name, entry.Color) }
+	local c = entry.Color
+	return {
+		name = entry.Name,
+		color = c,
+		dim = themeDim(c),
+		sh = themeShades(entry.Name, c),
+		track = Color3.fromRGB(c.R * 255 * 0.274, c.G * 255 * 0.274, c.B * 255 * 0.274), -- the empty part of the Gravity / Jump / Speed sliders (Red = 60, 0, 0 like before)
+	}
 end
 
 function Theme.find(name)
@@ -2814,7 +3005,7 @@ function Theme.apply(name)
 	end
 	Theme.cur, Theme.sh = new, new.sh
 	PRIMARY = new.color
-	local swaps = { { old.color, new.color }, { old.dim, new.dim } }
+	local swaps = { { old.color, new.color }, { old.dim, new.dim }, { old.track, new.track } }
 	for key, oldColor in pairs(old.sh) do
 		swaps[#swaps + 1] = { oldColor, new.sh[key] }
 	end
@@ -2965,9 +3156,18 @@ local A = {
 ----------------------------------------------------------------
 local BG_BASE_COLOR = Color3.fromRGB(10, 10, 10) -- dark base behind the window art
 local BG_BASE_TRANSPARENCY = 0.3 -- background transparency of the extension windows (0 = solid black, 1 = invisible)
-Theme.MainBgTransparency = 0.29 -- background transparency of the MAIN window (MainFrame). Roblox only accepts 0..1 (0 = solid, 1 = invisible)
+Theme.MainBgTransparency = 0.14 -- background transparency of the MAIN window (MainFrame). 0 = solid, 1 = invisible (Roblox only draws 0..1; was 0.40, then 2.3 which looks the same as 1, then 0.23, 0.18 and 0.15)
+Theme.MainBgImageTransparency = 0.50 -- transparency of the dark glow texture on the MAIN window only (was 0.3 = too dark). The extension windows keep BG_IMAGE_TRANSPARENCY
 local BG_TINT = Color3.fromRGB(0, 0, 0) -- glow image color (black, same as the source) - makes the glow dark
 local BG_IMAGE_TRANSPARENCY = 0.3 -- window texture transparency, drawn on top of the dark base (0 = solid, 1 = invisible)
+-- LEFT GLOW of the hub windows: a dark shadow laid OVER the left edge of the window - over the title-bar logo, the icon column and the left end of the
+-- rows (so the layer is UP and the icons are DOWN under it). Measured on the reference screenshot of the detached Hub: a white icon reads 56 / 255 at 2% of
+-- the window width, 87 at 3.5%, 107 at 4.9%, 117 at 6.1% (a white toggle knob elsewhere reads 251) - a straight fade that fits 0.85 at the edge down to 0 at 15%.
+local LEFT_GLOW = {
+	Width = 0.15, -- how far the shadow reaches, as a fraction of the window width
+	Strength = 0.85, -- how dark it is right at the left edge (0 = nothing, 1 = black)
+	ZIndex = 703, -- above the window art (700), the body (701) and the title bar (702): it dims everything under it
+}
 local PANEL_COLOR = Color3.fromRGB(18, 18, 18) -- glass panels (Welcome / Best Scripts)
 local PANEL_TRANSPARENCY = 0.5
 local TOP_BUTTON_SIZE = 0.05 -- (source = .125 of the window HEIGHT with a 1:1 ratio = 0.0703 of the width; set 0.0703 for the exact source size) close / maximize size (fraction of window width) - matches the reference (was 0.057, too big; 0.044 was too small)
@@ -2977,7 +3177,7 @@ local ORB_GLOW_SIZE = 3.3 -- glow behind the Arcy orb (bottom-left of the Editor
 local ORB_GLOW_TRANSPARENCY = 0 -- orb glow brightness, STATIC (no animation): 0 = full glow like the source, 0.4 = softer, 1 = off
 local TAB_START_Y = 0.265 -- first sidebar icon (fraction of window height)
 local TAB_STEP = 0.13 -- gap between sidebar icons (6 icons now: Settings sits at the bottom)
-local LOGO_HEIGHT = 0.10 -- top logo height (fraction of window height) - matches the reference screenshot (~10%); was 0.08
+local LOGO_HEIGHT = 0.08 -- top logo height (fraction of window height) - the source's value (.08); on the reference screenshot the deer is 28 px of the 360 px window. Was 0.10, which made it 34 px = too big
 local LOCK_SLIDER_WHEN_OFF = true -- true: a slider bar only moves while its red dot is ON (off = locked, the bar shakes a little). false: bars always move
 local DOT_HOP_HEIGHT = 0.04 -- how high the red dot hops (fraction of the slider panel height)
 local DOT_HOP_UP_TIME = 0.32 -- seconds going up   (bigger = slower)
@@ -2986,16 +3186,60 @@ local FULLSCREEN_COVER_NOTCH = true -- full screen also covers the side notch / 
 
 -- floating button (appears only after the red close button)
 local FLOAT_LOGO = A.Logo -- the deer in the middle (the same asset the source uses for its FloatingIconLogo)
-local FLOAT_GLOW_TINT = nil -- one fixed Color3 for the glow when the cycle is off, e.g. Color3.fromRGB(255, 75, 165). nil = the first color of the list below (pink)
+local FLOAT_GLOW_TINT = nil -- one fixed Color3 for the glow when the cycle is off, e.g. Color3.fromRGB(255, 0, 0). nil = the first color of the list below (red)
 local FLOAT_GLOW_STRENGTH = 1 -- glow brightness (1 = normal, 0.6 = softer, 1.4 = brighter)
-local FLOAT_GLOW_CORE = 0.7 -- brightness of the hot center inside the glow (0 = off, 1 = as bright as the outer glow)
-Theme.FLOAT_GLOW = { Min = 0.2, Max = 0.8 } -- THE RANGE: the glow only breathes between 2 and 8 out of 10 (0.2 .. 0.8), flares included. (a table field on purpose: this file is at Luau's limit of 200 local variables, so never add a new 'local' up here)
-local FLOAT_GLOW_CYCLE = true -- true = the glow breathes pink, then blue, then red, and repeats (only these colors, never mixed, so no purple and no coral)
-local FLOAT_GLOW_CYCLE_TIME = 9 -- seconds for one full round of the colours (bigger = slower)
-local FLOAT_GLOW_COLORS = {
-	Color3.fromRGB(255, 75, 165), -- pink
-	Color3.fromRGB(25, 115, 255), -- blue
-	Color3.fromRGB(255, 30, 40), -- red
+local FLOAT_GLOW_CORE = 0.8 -- opacity of the small dense dark-red center right behind the deer (0 = off, 1 = full)
+Theme.FLOAT_GLOW = { Min = 0.2, Max = 0.8 } -- THE LIMITS: the glow brightness never leaves 2 .. 8 out of 10 (0.2 .. 0.8), flares included. (a table field on purpose: this file is at Luau's limit of 200 local variables, so never add a new 'local' up here)
+Theme.HUB_TILE = { -- the Arceus Hub tile on the Home page (fractions of the tile). The SOURCE's numbers (HomeTipBackground) were: logo 0.75 x 0.75 at LogoY -0.025, name at NameY 0.65. Now the logo is a bit smaller than before (0.86) and the name sits a little lower so they do not touch
+	LogoW = 0.86, -- width of the logo box (the picture is fitted inside it)
+	LogoH = 0.86, -- height of the logo box: bigger number = bigger logo
+	LogoY = -0.05, -- top of the logo box (box centre = LogoY + LogoH / 2 = 0.38)
+	NameY = 0.7, -- top of the "Arceus Hub" name under it (its centre = NameY + 0.1 = 0.8)
+}
+Theme.SLIDER_FX = { -- Gravity / Jump / Speed glow. Same construction as the SOURCE (Slider_* on the Home page): glass pill picture + dot that is only a glow
+	BackingTransparency = 1, -- dark fill behind the glass pill. 1 = none (the source: the glass picture alone makes the empty part, like the reference). 0.55 = the old darker look
+	DotGlowSize = 3.4, -- size of the glow that IS the toggle dot, in dot sizes (the source draws the glow at 4x its tiny button). Bigger = bigger soft halo
+	DotSolid = false, -- false = the dot is only the glow (source / reference). true = also draw a solid disc under the glow (the old look)
+	IconUnderGlass = true, -- true = the icon sits under the glass picture like the source (slightly tinted, as on the reference). false = pure white icon on top
+}
+Theme.FLOAT_FX = { -- floating button look, measured on the reference screenshot (button = 72 px there; all sizes are in button sizes)
+	LogoSize = 0.75, -- the deer (reference: 54 px)
+	LogoTransparency = 0.25, -- the source's FloatingIconLogo value: the glow shows through the deer a little
+	SubSize = 0.49, -- the tab icons (reference: 35 px)
+	HaloMain = 2.2, -- diameter of the wide soft glow behind the deer (reference: faint out to about 75 px)
+	CoreRatio = 0.25, -- the small dense center, compared to the wide glow
+	HaloSub = 2.6, -- diameter of the glow behind each tab icon, in tab icon sizes
+	GlowPeak = 0.55, -- opacity of the wide glow at its center when the level is 1 (about 0.27 at the resting level)
+	GlowLevel = 0.5, -- resting level (0.2 .. 0.8, see Theme.FLOAT_GLOW)
+	GlowBreath = 0.14, -- how much the level breathes (0 = still)
+	SubGlowPeak = 0.16, -- tab icon glows are much fainter (the source draws them at half opacity)
+	Sparks = 22, -- red sparks around the deer
+	SparkSpread = 0.78, -- how far a spark drifts (button sizes)
+	SparkMin = 0.036, -- dot size range (button sizes; was 0.026 .. 0.045)
+	SparkMax = 0.062,
+	SparkTransparency = 0.56, -- transparency of every dot (0 = solid, 1 = invisible); it never fades
+	SparkLife = 0.03, -- seconds a dot stays on one spot before it teleports to the next (each one varies a little). Smaller = faster (was 0.06)
+	SparkRate = 60, -- how many times per second the dots are updated (was 45). Raise it if a dot ever looks slower than SparkLife
+	SubSparks = 5, -- sparks around each tab icon
+	SubSparkSpread = 0.42,
+	SubSparkMin = 0.028, -- dot size range around the tab icons (was 0.02 .. 0.032)
+	SubSparkMax = 0.045,
+	SubSparkStrength = 0.6, -- how bright the tab icon sparks get (1 = like the deer's)
+	OpenTime = 0.5, -- seconds to fan out (the source: 0.5)
+	CloseTime = 0.3, -- seconds to tuck in
+	Spin = 4.85, -- radians of swirl while fanning out (the source: 5 x 0.97)
+	Stagger = 0, -- 0 = all icons leave together like the source; 0.3 = they follow each other
+	HeadSpring = true, -- the source's AnimateCascade spring on the deer: pop 1.05 > 1 when the button appears, 0.9 > 1 when the tab icons fan out, 1.05 > 1 when they tuck in. false = completely still
+	HeadMotion = 0, -- the deer's own motion. 0 = completely still like the source's FloatingIconLogo (v5); 1 = the old idle bob + the squeeze while you hold + the little kick
+}
+local FLOAT_GLOW_CYCLE = true -- true = the glow walks through the colors below and back again, like the source; false = one fixed color
+local FLOAT_GLOW_CYCLE_TIME = 5 -- seconds for one full round of the colours (the source: 5)
+local FLOAT_GLOW_COLORS = { -- the source's aiColors (red, pink, violet, blue, pink); keep only the first line for a solid red glow
+	Color3.fromRGB(255, 0, 0), -- red
+	Color3.fromRGB(255, 56, 105), -- pink
+	Color3.fromRGB(245, 115, 237), -- violet
+	Color3.fromRGB(20, 166, 255), -- blue
+	Color3.fromRGB(255, 56, 105), -- pink
 }
 local FLOAT_SIZE = 0.1 -- button size (fraction of the screen's shorter side): SMALL. Bigger number = bigger button (was 0.24; try 0.08 for even smaller)
 local FLOAT_START = UDim2.fromScale(0.67, 0.44) -- where it first appears (drag it anywhere afterwards, it remembers)
@@ -3079,6 +3323,95 @@ local function pressFx(button)
 			tween(scale, 0.12, { Scale = 1 })
 		end
 	end)
+end
+
+Theme.SIDE_FX = {
+	Drop = 0.15,
+	DropTime = 0.15,
+	ReturnTime = 0.6,
+	Stagger = 0.0075,
+	IndicatorTime = 0.25,
+	Breath = true,
+	runs = setmetatable({}, { __mode = "k" }),
+}
+
+Theme.SIDE_FX.run = function(items, fade)
+	local fx = Theme.SIDE_FX
+	for _, item in ipairs(items) do
+		local obj = item.obj
+		if typeof(obj) == "Instance" and obj.Parent then
+			local old = fx.runs[obj]
+			local base = old and old.base
+			if old then
+				for _, tw in ipairs(old) do
+					tw:Cancel()
+				end
+			end
+			if not base then
+				base = { pos = obj.Position }
+				if obj:IsA("ImageLabel") or obj:IsA("ImageButton") then
+					base.img = obj.ImageTransparency
+				end
+			end
+			local mine = { base = base }
+			fx.runs[obj] = mine
+			obj.Position = base.pos
+			if base.img then
+				obj.ImageTransparency = fade and 1 or base.img
+			end
+			mine[1] = tween(obj, fx.DropTime, { Position = base.pos + UDim2.new(0, 0, fx.Drop, item.lift or 0) }, Enum.EasingStyle.Linear)
+			task.delay(fx.DropTime + (item.order or 0) * fx.Stagger, function()
+				if not alive or fx.runs[obj] ~= mine or not obj.Parent then
+					return
+				end
+				local goal = { Position = base.pos }
+				if fade and base.img then
+					goal.ImageTransparency = base.img
+				end
+				mine[2] = tween(obj, fx.ReturnTime, goal, Enum.EasingStyle.Back)
+				task.delay(fx.ReturnTime + 0.05, function()
+					if fx.runs[obj] == mine then
+						fx.runs[obj] = nil
+						if obj.Parent then
+							obj.Position = base.pos
+							if base.img then
+								obj.ImageTransparency = base.img
+							end
+						end
+					end
+				end)
+			end)
+		end
+	end
+end
+
+Theme.SIDE_FX.dip = function(root)
+	local items = {}
+	local function collect(parent)
+		for _, child in ipairs(parent:GetChildren()) do
+			if child:IsA("GuiObject") and child.Visible then
+				items[#items + 1] = { obj = child, order = #items }
+				collect(child)
+			end
+		end
+	end
+	collect(root)
+	Theme.SIDE_FX.run(items, false)
+end
+
+Theme.SIDE_FX.rise = function(root)
+	local fx = Theme.SIDE_FX
+	local lift = fx.Drop * root.AbsoluteSize.Y
+	local items = {}
+	for _, child in ipairs(root:GetChildren()) do
+		if child:IsA("GuiObject") and string.sub(child.Name, 1, 8) == "SideBtn_" and child.Visible then
+			local icon = child:FindFirstChildOfClass("ImageLabel")
+			if icon then
+				items[#items + 1] = { obj = icon, lift = lift, order = #items * 2 + 1 }
+			end
+		end
+	end
+	fx.run(items, true)
 end
 
 ----------------------------------------------------------------
@@ -3722,7 +4055,7 @@ local bgImage = new("ImageLabel", {
 	Name = "BackgroundImage",
 	Image = A.Background,
 	ImageColor3 = BG_TINT,
-	ImageTransparency = BG_IMAGE_TRANSPARENCY,
+	ImageTransparency = Theme.MainBgImageTransparency,
 	ScaleType = Enum.ScaleType.Stretch, -- fills the window exactly (same size as the background)
 	Position = UDim2.fromScale(0, 0),
 	Size = UDim2.fromScale(1, 1),
@@ -3750,7 +4083,7 @@ task.delay(4, function()
 	if alive and windowState == "open" and not main.Visible then
 		main.Visible = true
 		main.BackgroundTransparency = Theme.MainBgTransparency
-		bgImage.ImageTransparency = BG_IMAGE_TRANSPARENCY
+		bgImage.ImageTransparency = Theme.MainBgImageTransparency
 		popScale.Scale = 1
 	end
 end)
@@ -3807,6 +4140,7 @@ for i, tab in ipairs(TABS) do
 	})
 	pressFx(btn)
 	btn.Activated:Connect(function()
+		pcall(Theme.SIDE_FX.dip, btn)
 		callHook("OnTab", tab.Name) -- the Editor page section below listens to this hook
 	end)
 end
@@ -3863,6 +4197,10 @@ navBtn.Activated:Connect(function()
 	end
 	tween(sidebar, 0.25, { Position = UDim2.fromScale(navOpen and 0 or -0.075, 0) })
 	tween(navBtn, 0.25, { Rotation = navOpen and 180 or 0 })
+	pcall(Theme.SIDE_FX.dip, navBtn)
+	if navOpen then
+		pcall(Theme.SIDE_FX.rise, sidebar)
+	end
 	if pageArea then
 		tween(pageArea, 0.25, { Size = UDim2.fromScale(navOpen and 0.925 or 1, 1) })
 	end
@@ -3910,7 +4248,7 @@ local function openWindow(tabName)
 	bgImage.ImageTransparency = 1
 	main.Visible = true
 	tween(main, 0.3, { BackgroundTransparency = Theme.MainBgTransparency })
-	tween(bgImage, 0.3, { ImageTransparency = BG_IMAGE_TRANSPARENCY })
+	tween(bgImage, 0.3, { ImageTransparency = Theme.MainBgImageTransparency })
 	tween(popScale, 0.5, { Scale = 1 }, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
 	task.delay(0.55, function()
 		if windowState == "opening" then
@@ -3954,21 +4292,146 @@ local function closeWindow()
 	task.delay(0.6, finish) -- safety net in case the fade never reports completion
 end
 
+----------------------------------------------------------------
+-- RED + BLUE BUTTONS ON TOP  (source: CloseButton / MaximizeButton + the "CLOSE/MAXIMIZE BUTTON ORB LOOP" animation)
+-- The source gives these two buttons NO texture id. Both are empty ImageButtons whose picture is painted at run time
+-- (utils:AddAnimation -> a 64x64 EditableImage, 2.5 s loop) and shared by the two buttons; each one only tints it:
+--   MaximizeButton ImageColor3 = #58B2FF    CloseButton ImageColor3 = Colors_Primary (219,0,0 = the Primary Color)
+-- The picture is a WHITE orb: radius .9 that wobbles a little (3 sine waves), body opacity 200/255, and a soft glow around
+-- it (up to .5 opacity) that pulses once per loop. Tinted and drawn over the dark window this gives the real
+-- dark red (179,7,8) and blue (77,147,208) of the reference (checked pixel by pixel on the screenshot).
+-- Every number below is the source's. If EditableImage is not allowed, the buttons fall back to the old picture A.TopButton.
+----------------------------------------------------------------
+Theme.TOP_ORB = {
+	Size = 0.0703, -- button size as a fraction of the window width = the source's .125 of the window HEIGHT with a 1:1 ratio (window is 16:9)
+	Res = 64, -- pixels per side (source: 64 at its default animation quality)
+	Frames = 60, -- pictures in one loop (source: 32 per second x 2.5 s = 80; 60 looks the same and is lighter). 0 = no animation, still orb
+	Duration = 2.5, -- seconds for one loop (source: 2.5)
+	CoordScale = 2, WaveBase = 0.9, WaveRange = 0.035, Freq1 = 2, Freq2 = 1, Freq3 = 4, -- the wobble (source numbers)
+	GlowRange = 0.4, GlowMaxAlpha = 0.5, BodyMaxAlpha = 200, -- glow reach / glow opacity / body opacity out of 255 (source numbers)
+	content = nil, -- filled below: the picture both buttons share (stays nil when EditableImage is blocked)
+}
+do
+	local O = Theme.TOP_ORB
+	local res = O.Res
+	local count = math.max(O.Frames, 1)
+	local okImg, editable = pcall(function()
+		return AssetService:CreateEditableImage({ Size = Vector2.new(res, res) })
+	end)
+	if okImg and editable then
+		local function smoothstep(e0, e1, x)
+			local t = math.clamp((x - e0) / (e1 - e0), 0, 1)
+			return t * t * (3 - 2 * t)
+		end
+
+		-- one picture of the loop (frame i = 0 .. count - 1): the source's formula, pixel for pixel
+		local function renderFrame(i)
+			local buf = buffer.create(res * res * 4)
+			local tAngle = (i / count) * 2 * math.pi
+			local AA = 1 / O.CoordScale
+			local pulse = 0.5 + 0.5 * math.sin(tAngle)
+			local reach = O.WaveBase + O.GlowRange + O.WaveRange -- beyond this the pixel is empty: skip the maths
+			for py = 0, res - 1 do
+				local ny = (((py + 0.5) / res) * 2 - 1) * O.CoordScale
+				for px = 0, res - 1 do
+					local nx = (((px + 0.5) / res) * 2 - 1) * O.CoordScale
+					local dist = math.sqrt(nx * nx + ny * ny)
+					local a = 0
+					if dist <= reach then
+						local angle = math.atan2(ny, nx)
+						local waveR = O.WaveBase
+							+ O.WaveRange * 0.5 * math.sin(tAngle * O.Freq1 + angle * 3)
+							+ O.WaveRange * 0.3 * math.sin(tAngle * O.Freq2 - angle * 2)
+							+ O.WaveRange * 0.2 * math.sin(tAngle * O.Freq3 + angle * 5)
+						waveR = math.clamp(waveR, 0.1, 1.1)
+						local d = dist - waveR
+						local alphaBody = smoothstep(AA * 0.5, -AA * 0.5, d) * (O.BodyMaxAlpha / 255)
+						local alphaGlow = 0
+						if d > 0 and d < O.GlowRange then
+							alphaGlow = smoothstep(O.GlowRange + AA * 0.5, -AA * 0.5, d) * O.GlowMaxAlpha * (0.7 + 0.3 * pulse)
+						end
+						a = math.floor(math.clamp(math.max(alphaBody, alphaGlow) * 255, 0, 255) + 0.5)
+					end
+					-- white, alpha in the top byte (the same layout as the glow textures of the floating button)
+					buffer.writeu32(buf, (py * res + px) * 4, 16777215 + a * 16777216)
+				end
+			end
+			return buf
+		end
+
+		local size = Vector2.new(res, res)
+		local frames, ready = {}, false -- frames[0] is drawn now, the others in the background
+		local okFirst, content = pcall(function()
+			frames[0] = renderFrame(0)
+			editable:WritePixelsBuffer(Vector2.zero, size, frames[0])
+			return Content.fromObject(editable)
+		end)
+		if okFirst and content then
+			O.content = content -- the buttons are built right after this block and show the first picture at once
+			gui.Destroying:Once(function()
+				pcall(function()
+					editable:Destroy()
+				end)
+			end)
+
+			if O.Frames > 1 then
+				-- the other pictures are drawn in the background a few at a time (no hitch at start-up), then the loop plays
+				task.spawn(function()
+					for i = 1, count - 1 do
+						if not alive then
+							return
+						end
+						frames[i] = renderFrame(i)
+						if i % 4 == 0 then
+							task.wait()
+						end
+					end
+					ready = true
+				end)
+				local shown = 0
+				keepConn(RunService.Heartbeat:Connect(function()
+					if not ready or not alive or not main.Visible then
+						return -- idle while the window is hidden
+					end
+					-- time based, so the loop keeps its speed at any frame rate
+					local i = math.floor((os.clock() % O.Duration) / O.Duration * count) % count
+					if i ~= shown and (Theme.Perf.scale <= 1 or i % Theme.Perf.scale == 0) then
+						shown = i
+						pcall(function()
+							editable:WritePixelsBuffer(Vector2.zero, size, frames[i])
+						end)
+					end
+				end))
+			end
+		else
+			pcall(function()
+				editable:Destroy()
+			end)
+		end
+	end
+end
+
 local function circleButton(name, x, color, callback)
-	-- the new image IS the button now (no frame dot / extra glow)
+	-- the source's orb picture (white, tinted by ImageColor3) - or, without EditableImage, the old stand-in picture
+	local orb = Theme.TOP_ORB
+	local useOrb = orb.content ~= nil
+	local side = useOrb and orb.Size or TOP_BUTTON_SIZE
 	local btn = new("ImageButton", {
 		Name = name,
-		Image = A.TopButton,
-		ImageColor3 = TOP_BUTTON_TINT and color or Color3.new(1, 1, 1),
+		Image = useOrb and "" or A.TopButton,
+		ImageColor3 = (useOrb or TOP_BUTTON_TINT) and color or Color3.new(1, 1, 1),
 		ScaleType = Enum.ScaleType.Fit,
 		AutoButtonColor = false,
 		AnchorPoint = Vector2.new(0.5, 0.5),
 		Position = UDim2.fromScale(x, 0.065),
-		Size = UDim2.fromScale(TOP_BUTTON_SIZE, TOP_BUTTON_SIZE * 16 / 9), -- square (window is 16:9)
+		Size = UDim2.fromScale(side, side * 16 / 9), -- square (window is 16:9)
 		BackgroundTransparency = 1,
 		ZIndex = 50,
 		Parent = main,
 	}, { ratio(1) })
+	if useOrb then
+		btn.ImageContent = orb.content
+	end
 	pressFx(btn)
 	btn.Activated:Connect(callback)
 	return btn
@@ -4040,15 +4503,18 @@ circleButton("MaximizeButton", 0.91, Color3.fromHex("#58B2FF"), function()
 	setWindowSize(sizeIndex)
 end)
 do -- (own block: the script is close to Lua's limit of local variables)
-	local closeBtn = circleButton("CloseButton", 0.9625, Theme.sh.close, function() -- the source's CloseButton has Colors_Primary: it follows the primary colour
+	local function closeTint(theme) -- the orb is tinted with the Primary Color itself (source: Colors_Primary); the old stand-in picture keeps its brighter tint
+		return Theme.TOP_ORB.content and theme.color or theme.sh.close
+	end
+	local closeBtn = circleButton("CloseButton", 0.9625, closeTint(Theme.cur), function() -- the source's CloseButton has Colors_Primary: it follows the primary colour
 		if popupRefs.close and popupRefs.close() then
 			return -- an open script card closes first (like the source); press again to close the window
 		end
 		closeWindow()
 	end)
 	Theme.onChange(function(theme) -- Settings > Primary Color: the red button on top changes colour too
-		if TOP_BUTTON_TINT then
-			closeBtn.ImageColor3 = theme.sh.close
+		if Theme.TOP_ORB.content or TOP_BUTTON_TINT then
+			closeBtn.ImageColor3 = closeTint(theme)
 		end
 	end)
 end
@@ -4117,49 +4583,140 @@ end
 -- FLOATING BUTTON
 -- Only exists after the red close button. Tap = reopen the window, hold = fan out every tab icon
 -- (hold again = tuck them back in), drag = move it anywhere.
+-- Look and motion come from the source's "SeamlessOrb" (FloatingIcon + SubIcons) and the reference screenshots:
+--   * a soft round glow = a wide faint halo + a small dense core (two small textures drawn in code, tinted per frame;
+--     falls back to rings if EditableImage is off)
+--     whose colour walks red > pink > violet > blue and back, 5 s per round (the source's aiColors)
+--   * tiny sparks that drift out of the logo and fade (the source's particles, same fade curve)
+--   * tab icons that spiral out of the logo: distance grows linearly, about 280 degrees of swirl, Back-eased pop
+-- Sizes were measured on the reference (logo 54 px, tab icons 35 px, ring radius 107 px, glow reaching about 50 px,
+-- on a 72 px button). Every number is in Theme.FLOAT_FX and the FLOAT_ settings in LOOK SETTINGS.
+-- (State and helpers live in the tables S and H on purpose: this file is at Luau's limit of 200 local variables.)
 ----------------------------------------------------------------
 do
-	local LOGO_SIZE, SUB_SIZE = 0.62, 0.48 -- deer / tab icon size (in button sizes)
-	local CORE_RATIO = 0.5 -- size of the hot center compared to the outer glow
-	local HALO_MAIN, HALO_SUB = 3.2, 3.0 -- glow size: behind the deer (button sizes) / behind each tab icon (tab icon sizes)
-	local OPEN_TIME, CLOSE_TIME, STAGGER = 0.6, 0.32, 0.45 -- seconds to fan out / tuck in, and how much the icons follow each other
-	local SPIN = math.rad(-220) -- the icons swirl in from this angle while they fan out
-	local DRAG_THRESHOLD = 10 -- pixels of finger travel before a press counts as a drag
+	local FX = Theme.FLOAT_FX
+	local S = { -- state
+		TAU = math.pi * 2,
+		shown = false, -- the button is showing (the window is closed)
+		press = nil, -- the finger / mouse press currently on the button
+		t = 0, -- tab icon fan: 0 = tucked in ...
+		goal = 0, -- ... 1 = fully out (t walks towards goal)
+		charge = 0, -- hold wind-up
+		kick = 0, -- flare when the icons fan out
+		lift = 0, -- lift while dragging
+		nudge = nil, -- tween that keeps the fanned-out ring on screen
+		shownAt = os.clock(), -- the colour cycle restarts at the first colour (red) every time the button pops in
+		sparkTimer = 0,
+		palette = {},
+	}
+	local H = {} -- helpers
 
-	local floatShown = false
-	local press = nil -- the finger / mouse press currently on the button
-	local radialT, radialGoal = 0, 0 -- tab icon fan: 0 = tucked in, 1 = fully out
-	local charge, kick, lift = 0, 0, 0 -- hold wind-up, flare when the icons fan out, lift while dragging
-	local nudgeTween = nil
-
-	local function easeOutBack(x)
+	function H.easeOutBack(x)
 		local c1 = 1.3
 		return 1 + (c1 + 1) * (x - 1) ^ 3 + c1 * (x - 1) ^ 2
 	end
 
-	local function easeOutExpo(x)
-		return x >= 1 and 1 or 1 - 2 ^ (-10 * x)
-	end
-
-	local palette, coreColors = {}, {}
-	for _, c in ipairs(FLOAT_GLOW_COLORS) do
-		if typeof(c) == "Color3" then
-			table.insert(palette, c)
-			table.insert(coreColors, c:Lerp(Color3.new(1, 1, 1), 0.28))
+	----------------------------------------------------------------
+	-- colours: FLOAT_GLOW_COLORS walked up and down (like the source: mf 0 -> 1 -> 0, one round per FLOAT_GLOW_CYCLE_TIME)
+	----------------------------------------------------------------
+	-- Red (the default) keeps the source's list. Any other Primary Color: the glow walks shades of that colour instead, so nothing red is left behind the deer.
+	function H.setPalette(theme)
+		table.clear(S.palette)
+		if theme and theme.name ~= "Red" and typeof(theme.color) == "Color3" then
+			local h, sat, val = theme.color:ToHSV()
+			local function shade(dh, ds, dv)
+				return Color3.fromHSV((h + dh) % 1, math.clamp(sat * ds, 0, 1), math.clamp(val * dv, 0, 1))
+			end
+			table.insert(S.palette, theme.color)
+			table.insert(S.palette, shade(0.03, 0.9, 1))
+			table.insert(S.palette, shade(0.07, 0.75, 1))
+			table.insert(S.palette, shade(0.1, 0.9, 1))
+			table.insert(S.palette, shade(0.03, 0.9, 1))
+		else
+			for _, c in ipairs(FLOAT_GLOW_COLORS) do
+				if typeof(c) == "Color3" then
+					table.insert(S.palette, c)
+				end
+			end
 		end
+		S.count = #S.palette
+		S.base = typeof(FLOAT_GLOW_TINT) == "Color3" and FLOAT_GLOW_TINT or S.palette[1] or Color3.fromRGB(255, 0, 0)
 	end
-	local paletteCount = #palette
-	local cycleTime = math.max(tonumber(FLOAT_GLOW_CYCLE_TIME) or 9, 1)
-	local coreStrength = math.clamp(tonumber(FLOAT_GLOW_CORE) or 0, 0, 1)
-	local glowStrength = math.max(tonumber(FLOAT_GLOW_STRENGTH) or 1, 0)
-	local baseColor = typeof(FLOAT_GLOW_TINT) == "Color3" and FLOAT_GLOW_TINT or palette[1] or Color3.fromRGB(255, 75, 165)
-	local baseCore = baseColor:Lerp(Color3.new(1, 1, 1), 0.28)
+	H.setPalette(Theme.cur)
+	Theme.onChange(function(theme) -- Settings > Primary Color: the deer's glow follows
+		H.setPalette(theme)
+	end)
+	S.cycle = math.max(tonumber(FLOAT_GLOW_CYCLE_TIME) or 5, 0.5)
+	S.core = math.clamp(tonumber(FLOAT_GLOW_CORE) or 0, 0, 1)
+	S.strength = math.max(tonumber(FLOAT_GLOW_STRENGTH) or 1, 0)
+
+	function H.orbColor(t)
+		if not FLOAT_GLOW_CYCLE or S.count < 2 then
+			return S.base
+		end
+		local mf = 0.5 - 0.5 * math.cos(((t - S.shownAt) / S.cycle) * S.TAU)
+		local seg = mf * (S.count - 1)
+		local i = math.floor(seg)
+		local c0 = S.palette[i + 1]
+		local c1 = S.palette[i + 2] or S.palette[1]
+		return c0:Lerp(c1, seg - i)
+	end
 
 	----------------------------------------------------------------
-	-- glow builder (a soft round glow drawn from white circles inside a CanvasGroup, tinted with the exact glow color,
-	-- so the picture can never muddy the color; pulsed from the animation loop below)
+	-- glow textures: white round gradients, alpha = (1 - smoothstep)^power, drawn once and tinted with ImageColor3 (so the colour
+	-- is always exact). "wide" (power 0.64) is the long soft halo fitted to the reference screenshot: about 0.2 opacity at 33 px,
+	-- 0.1 at 54 px, gone at 80 px. "core" (power 1.6) is the small dense dark-red centre right behind the deer.
 	----------------------------------------------------------------
-	local function glowLayer(name, size, z, parent, rings, peak, power, color)
+	function H.makeTexture(power)
+		local res = 96
+		local okImg, editable = pcall(function()
+			return AssetService:CreateEditableImage({ Size = Vector2.new(res, res) })
+		end)
+		if not okImg or not editable then
+			return nil
+		end
+		local buf = buffer.create(res * res * 4)
+		local half = res / 2
+		for y = 0, res - 1 do
+			for x = 0, res - 1 do
+				local dx, dy = (x + 0.5 - half) / half, (y + 0.5 - half) / half
+				local d = math.sqrt(dx * dx + dy * dy)
+				local a = 0
+				if d < 1 then
+					a = (1 - d * d * (3 - 2 * d)) ^ power
+				end
+				buffer.writeu32(buf, (y * res + x) * 4, 16777215 + math.floor(a * 255 + 0.5) * 16777216)
+			end
+		end
+		local okWrite = pcall(function()
+			editable:WritePixelsBuffer(Vector2.zero, Vector2.new(res, res), buf)
+		end)
+		local okContent, content = false, nil
+		if okWrite then
+			okContent, content = pcall(function()
+				return Content.fromObject(editable)
+			end)
+		end
+		if okWrite and okContent and content then
+			return { editable = editable, content = content }
+		end
+		pcall(function()
+			editable:Destroy()
+		end)
+		return nil
+	end
+
+	S.tex = { wide = H.makeTexture(0.64), core = H.makeTexture(1.6) }
+	gui.Destroying:Once(function()
+		for _, tex in pairs(S.tex) do
+			pcall(function()
+				tex.editable:Destroy()
+			end)
+		end
+	end)
+
+	-- fallback glow (no EditableImage): white circles inside a CanvasGroup, tinted with the glow colour
+	function H.glowLayer(name, size, z, parent, rings, peak, power, color)
 		local group = new("CanvasGroup", {
 			Name = name,
 			AnchorPoint = Vector2.new(0.5, 0.5),
@@ -4193,6 +4750,87 @@ do
 		return group
 	end
 
+	function H.newGlow(name, size, z, parent, color, kind)
+		local tex = S.tex[kind]
+		if tex then
+			return new("ImageLabel", {
+				Name = name,
+				BackgroundTransparency = 1,
+				BorderSizePixel = 0,
+				ImageContent = tex.content,
+				ImageColor3 = color,
+				ImageTransparency = 0.6,
+				ScaleType = Enum.ScaleType.Stretch,
+				AnchorPoint = Vector2.new(0.5, 0.5),
+				Position = UDim2.fromScale(0.5, 0.5),
+				Size = UDim2.fromScale(size, size),
+				ZIndex = z,
+				Parent = parent,
+			})
+		end
+		return H.glowLayer(name, size, z, parent, 16, 0.95, kind == "core" and 1.8 or 1, color)
+	end
+
+	function H.applyGlow(g, size, transparency, color)
+		g.Size = UDim2.fromScale(size, size)
+		if g.ClassName == "ImageLabel" then
+			g.ImageTransparency = transparency
+			g.ImageColor3 = color
+		else
+			g.GroupTransparency = transparency
+			g.GroupColor3 = color
+		end
+	end
+
+	----------------------------------------------------------------
+	-- sparks (the dots): NO animation. Each dot sits still at full brightness and, when its short life is over,
+	-- TELEPORTS to a new random spot around the button (no drift, no fade)
+	----------------------------------------------------------------
+	function H.respawn(set, p, now, stale)
+		local life = FX.SparkLife * (0.7 + math.random() * 0.6)
+		p.born = stale and (now - math.random() * life) or (p.born + p.span)
+		p.span = life
+		p.ang = math.random() * S.TAU
+		p.speed = 0.45 + math.random() * 0.55
+		p.size = set.minSize + math.random() * (set.maxSize - set.minSize)
+		p.dot.Size = UDim2.fromScale(p.size, p.size)
+	end
+
+	function H.newSparks(count, parent, z, spread, minSize, maxSize, strength)
+		local set = { list = {}, spread = spread, minSize = minSize, maxSize = maxSize, strength = strength }
+		local now = os.clock()
+		for i = 1, count do
+			local dot = new("Frame", {
+				Name = "Spark",
+				AnchorPoint = Vector2.new(0.5, 0.5),
+				BackgroundColor3 = S.base,
+				BackgroundTransparency = 1,
+				BorderSizePixel = 0,
+				ZIndex = z,
+				Parent = parent,
+			}, { new("UICorner", { CornerRadius = UDim.new(0.5, 0) }) })
+			local p = { dot = dot, born = now, span = 1, ang = 0, speed = 0.5, size = minSize }
+			H.respawn(set, p, now, true)
+			set.list[i] = p
+		end
+		return set
+	end
+
+	function H.stepSparks(set, now, color)
+		local spread, strength = set.spread, set.strength
+		for _, p in ipairs(set.list) do
+			local life = (now - p.born) / p.span
+			if life >= 1 then
+				H.respawn(set, p, now, life > 2)
+				life = (now - p.born) / p.span
+			end
+			local r = p.speed * spread -- fixed spot for the whole life of the dot: it jumps, it never moves
+			p.dot.Position = UDim2.fromScale(0.5 + math.cos(p.ang) * r, 0.5 + math.sin(p.ang) * r)
+			p.dot.BackgroundTransparency = FX.SparkTransparency -- constant, no fade in / out
+			p.dot.BackgroundColor3 = color
+		end
+	end
+
 	----------------------------------------------------------------
 	-- main button
 	----------------------------------------------------------------
@@ -4209,27 +4847,59 @@ do
 		ratio(1), -- always square, in landscape and portrait
 		new("UIScale", { Name = "PopScale", Scale = 0 }), -- pop in / suck back in (the tab icons are children, so they follow)
 	})
-	local floatPop = float.PopScale
 
-	local glow = glowLayer("Glow", HALO_MAIN, 1, float, 20, 0.95, 2, baseColor)
-	local core = glowLayer("Core", HALO_MAIN * CORE_RATIO, 2, float, 12, 0.95, 1.3, baseCore)
-
-	local logo = new("ImageLabel", {
+	local O = {} -- the parts of the main button
+	O.glow = H.newGlow("Glow", FX.HaloMain, 1, float, S.base, "wide")
+	O.core = H.newGlow("Core", FX.HaloMain * FX.CoreRatio, 2, float, S.base, "core") -- the dense dark red right behind the logo
+	O.logo = new("ImageLabel", {
 		Name = "Logo",
 		Image = FLOAT_LOGO,
-		ImageTransparency = 0.05,
+		ImageTransparency = FX.LogoTransparency, -- the source's FloatingIconLogo (.25): the glow shows through the deer a little
 		ScaleType = Enum.ScaleType.Fit,
 		AnchorPoint = Vector2.new(0.5, 0.5),
 		Position = UDim2.fromScale(0.5, 0.5),
-		Size = UDim2.fromScale(LOGO_SIZE, LOGO_SIZE),
+		Size = UDim2.fromScale(FX.LogoSize, FX.LogoSize),
 		BackgroundTransparency = 1,
 		ZIndex = 10,
 		Parent = float,
 	}, { new("UIScale", { Name = "Squash" }) })
-	local logoScale = logo.Squash
+	O.sparks = H.newSparks(FX.Sparks, float, 11, FX.SparkSpread, FX.SparkMin, FX.SparkMax, 1)
+
+	-- the deer's spring, from the source's utils:AnimateCascade(ficon, { ScaleCascade = true, ... }): the deer first goes to a start scale in 0.15 s
+	-- (linear), then springs to 1 with a Back ease.
+	--   "in"  = tab icons fan out (ficon.toggle(true)):  start 0.9,  settle 0.4 s,  Back Out
+	--   "out" = tab icons tuck in (ficon.toggle(false)): start 1.05, settle 0.25 s, Back In
+	--   "pop" = the button appears (ui.close):           start 1.05, settle 0.6 s,  Back Out
+	function H.headSpring(kind)
+		if not FX.HeadSpring or FX.HeadMotion ~= 0 then
+			return
+		end
+		local squash = O.logo:FindFirstChild("Squash")
+		if not squash then
+			return
+		end
+		S.headGen = (S.headGen or 0) + 1
+		local gen = S.headGen
+		if S.headTween then
+			S.headTween:Cancel()
+		end
+		local startScale, settle, dir = 1.05, 0.6, Enum.EasingDirection.Out
+		if kind == "in" then
+			startScale, settle = 0.9, 0.4
+		elseif kind == "out" then
+			settle, dir = 0.25, Enum.EasingDirection.In
+		end
+		S.headTween = tween(squash, 0.15, { Scale = startScale }, Enum.EasingStyle.Linear)
+		task.delay(0.15, function()
+			if gen ~= S.headGen or not alive then
+				return -- a newer spring took over
+			end
+			S.headTween = tween(squash, settle, { Scale = 1 }, Enum.EasingStyle.Back, dir)
+		end)
+	end
 
 	-- invisible hit area on top: this is what you tap, hold and drag (a bit bigger than the small button so it is easy to hit)
-	local hit = new("ImageButton", {
+	O.hit = new("ImageButton", {
 		Name = "Hit",
 		BackgroundTransparency = 1,
 		AutoButtonColor = false,
@@ -4240,31 +4910,40 @@ do
 		Parent = float,
 	})
 
-	-- one icon per sidebar tab, each with its own pulsing glow (Settings included)
+	-- one icon per sidebar tab, each with its own faint glow and sparks (Settings included)
 	local subs = {}
 	for i, tab in ipairs(TABS) do
 		local holder = new("Frame", {
 			Name = "Tab_" .. tab.Name,
 			AnchorPoint = Vector2.new(0.5, 0.5),
 			Position = UDim2.fromScale(0.5, 0.5),
-			Size = UDim2.fromScale(SUB_SIZE, SUB_SIZE),
+			Size = UDim2.fromScale(FX.SubSize, FX.SubSize),
 			BackgroundTransparency = 1,
 			Visible = false,
 			ZIndex = 6,
 			Parent = float,
 		}, { new("UIScale", { Name = "Pop", Scale = 0 }) })
 
-		local subGlow = glowLayer("Glow", HALO_SUB, 1, holder, 20, 0.95, 2, baseColor)
-		local subCore = glowLayer("Core", HALO_SUB * CORE_RATIO, 2, holder, 12, 0.95, 1.3, baseCore)
+		local subGlow = H.newGlow("Glow", FX.HaloSub, 1, holder, S.base, "wide")
 		new("ImageLabel", {
 			Name = "Icon",
 			Image = tab.Icon,
 			ScaleType = Enum.ScaleType.Fit,
 			AnchorPoint = Vector2.new(0.5, 0.5),
 			Position = UDim2.fromScale(0.5, 0.5),
-			Size = UDim2.fromScale(0.85, 0.85),
+			Size = UDim2.fromScale(1, 1),
 			BackgroundTransparency = 1,
 			ZIndex = 3,
+			Parent = holder,
+		})
+		-- the sparks live in a frame that is exactly one button size wide, so their numbers are in button sizes
+		local fx = new("Frame", {
+			Name = "Fx",
+			AnchorPoint = Vector2.new(0.5, 0.5),
+			Position = UDim2.fromScale(0.5, 0.5),
+			Size = UDim2.fromScale(1 / FX.SubSize, 1 / FX.SubSize),
+			BackgroundTransparency = 1,
+			ZIndex = 5,
 			Parent = holder,
 		})
 		local btn = new("ImageButton", {
@@ -4273,46 +4952,43 @@ do
 			AutoButtonColor = false,
 			AnchorPoint = Vector2.new(0.5, 0.5),
 			Position = UDim2.fromScale(0.5, 0.5),
-			Size = UDim2.fromScale(1.3, 1.3), -- a bit bigger than the icon so it is easy to hit
-			ZIndex = 4,
+			Size = UDim2.fromScale(1.6, 1.6), -- a bit bigger than the icon so it is easy to hit
+			ZIndex = 8,
 			Parent = holder,
 		})
 		pressFx(btn)
 		btn.Activated:Connect(function()
-			if floatShown and radialGoal == 1 then
+			if S.shown and S.goal == 1 then
 				openWindow(tab.Name)
 			end
 		end)
 
-		-- clockwise from the upper right, Home first (same arrangement as the reference screenshot)
-		subs[i] = { holder = holder, pop = holder.Pop, glow = subGlow, core = subCore, angle = math.rad(-40 + (i - 1) * 60) }
+		-- clockwise from the upper right, Home first (measured on the reference screenshot: Home at -38 degrees, 60 apart)
+		subs[i] = {
+			holder = holder,
+			pop = holder.Pop,
+			glow = subGlow,
+			sparks = H.newSparks(FX.SubSparks, fx, 5, FX.SubSparkSpread, FX.SubSparkMin, FX.SubSparkMax, FX.SubSparkStrength),
+			angle = math.rad(-38 + (i - 1) * 60),
+		}
 	end
 
-	local function glowAt(t)
-		if not FLOAT_GLOW_CYCLE or paletteCount == 0 then
-			return nil, 0.5 + 0.5 * math.sin(t * 2.4)
-		end
-		local x = (t / cycleTime) % 1 * paletteCount
-		local i = math.floor(x)
-		return i % paletteCount + 1, 0.5 - 0.5 * math.cos((x - i) * math.pi * 2)
-	end
-
-	local function fitRing()
+	function H.fitRing()
 		local screen = gui.AbsoluteSize
 		if screen.X <= 0 or screen.Y <= 0 then
 			return
 		end
-		local reach = (FLOAT_RING + SUB_SIZE * 0.65) * math.min(screen.X, screen.Y) * FLOAT_SIZE
+		local reach = (FLOAT_RING + FX.SubSize * 0.65) * math.min(screen.X, screen.Y) * FLOAT_SIZE
 		local mx = math.min(0.5, reach / screen.X)
 		local my = math.min(0.5, reach / screen.Y)
 		local goal = UDim2.fromScale(
 			math.clamp(float.Position.X.Scale, mx, 1 - mx),
 			math.clamp(float.Position.Y.Scale, my, 1 - my)
 		)
-		if nudgeTween then
-			nudgeTween:Cancel()
+		if S.nudge then
+			S.nudge:Cancel()
 		end
-		nudgeTween = tween(float, 0.25, { Position = goal })
+		S.nudge = tween(float, 0.25, { Position = goal })
 	end
 
 	----------------------------------------------------------------
@@ -4323,9 +4999,9 @@ do
 			return
 		end
 		local t = os.clock()
-		local p = press
+		local p = S.press
 		if p and (p.input.UserInputState == Enum.UserInputState.End or p.input.UserInputState == Enum.UserInputState.Cancel) then
-			press = nil
+			S.press = nil
 			p = nil
 		end
 
@@ -4333,69 +5009,77 @@ do
 		local holding = p ~= nil and not p.moved and not p.held
 		local follow = math.min(1, dt * 14)
 		if holding then
-			charge = math.clamp((t - p.t0) / FLOAT_HOLD_TIME, 0, 1)
+			S.charge = math.clamp((t - p.t0) / FLOAT_HOLD_TIME, 0, 1)
 		else
-			charge = charge * (1 - follow)
+			S.charge = S.charge * (1 - follow)
 		end
-		lift = lift + ((p ~= nil and p.moved and 1 or 0) - lift) * follow
-		kick = math.max(0, kick - dt * 2.8)
+		S.lift = S.lift + ((p ~= nil and p.moved and 1 or 0) - S.lift) * follow
+		S.kick = math.max(0, S.kick - dt * 2.8)
+		local charge, kick, lift = S.charge, S.kick, S.lift
 
 		local flare = charge * 0.3 + kick * 0.5 + lift * 0.12
 		local boost = 1 + charge * 0.1 + kick * 0.3 + lift * 0.08
-		local str = glowStrength
-		local colorIndex, wave = glowAt(t)
+
+		-- colour + brightness (the level never leaves Theme.FLOAT_GLOW, flares included)
+		local color = H.orbColor(t)
+		local coreColor = color:Lerp(Color3.new(0, 0, 0), 0.3) -- the source darkens the centre of the orb
+		local wave = 0.5 + 0.5 * math.sin((t - S.shownAt) * 1.9) -- slow breathing
 		local range = Theme.FLOAT_GLOW
 		local gMin = math.clamp(tonumber(range.Min) or 0.2, 0, 1)
 		local gMax = math.clamp(tonumber(range.Max) or 0.8, gMin, 1)
-		local level = str * (gMin + (gMax - gMin) * wave) -- breathes between gMin and gMax
-		local glowColor = colorIndex and palette[colorIndex] or nil
-		local coreColor = colorIndex and coreColors[colorIndex] or nil
+		local level = math.clamp(S.strength * (FX.GlowLevel + FX.GlowBreath * (wave - 0.5)) + flare, gMin, gMax)
 
-		local big = HALO_MAIN * (0.9 + 0.2 * wave) * boost
-		glow.Size = UDim2.fromScale(big, big)
-		glow.GroupTransparency = 1 - math.clamp(level + flare, gMin, gMax)
-		local small = HALO_MAIN * CORE_RATIO * (0.8 + 0.4 * wave) * boost
-		core.Size = UDim2.fromScale(small, small)
-		core.GroupTransparency = 1 - coreStrength * math.clamp(level + flare, gMin, gMax)
-		if glowColor then
-			glow.GroupColor3 = glowColor
-			core.GroupColor3 = coreColor
+		H.applyGlow(O.glow, FX.HaloMain * (0.96 + 0.08 * wave) * boost, 1 - FX.GlowPeak * level, color)
+		H.applyGlow(
+			O.core,
+			FX.HaloMain * FX.CoreRatio * (0.94 + 0.12 * wave) * boost,
+			1 - S.core * level,
+			coreColor
+		)
+
+		-- the deer itself: the source's FloatingIconLogo never moves (only the pop in / out and the tab icons do), so HeadMotion = 0 keeps it still
+		local headMotion = FX.HeadMotion
+		if headMotion ~= 0 then -- (old idle bob + squeeze, off by default; when it is off the spring tweens own the logo's scale)
+			O.logo.Squash.Scale = 1 + headMotion * (-0.18 * charge + 0.22 * kick + 0.1 * lift)
+			O.logo.Position = UDim2.fromScale(0.5, 0.5 + headMotion * 0.012 * math.sin(t * 1.8))
 		end
 
-		logoScale.Scale = 1 - 0.18 * charge + 0.22 * kick + 0.1 * lift
-		logo.Position = UDim2.fromScale(0.5, 0.5 + 0.015 * math.sin(t * 1.8)) -- gentle idle bob
+		S.sparkTimer = S.sparkTimer + dt
+		local doSparks = S.sparkTimer >= (1 / FX.SparkRate) * Theme.Perf.scale
+		if doSparks then
+			S.sparkTimer = 0
+			H.stepSparks(O.sparks, t, color)
+		end
 
-		-- tab icons fan out / tuck in, one after another, swirling as they go
-		if radialT ~= radialGoal or radialT > 0 then
-			if radialT ~= radialGoal then
-				local step = dt / (radialGoal > radialT and OPEN_TIME or CLOSE_TIME)
-				if radialGoal > radialT then
-					radialT = math.min(radialGoal, radialT + step)
+		-- tab icons spiral out of the logo / back into it (the source: linear distance, swirl that unwinds, Back-eased pop)
+		if S.t ~= S.goal or S.t > 0 then
+			if S.t ~= S.goal then
+				local step = dt / (S.goal > S.t and FX.OpenTime or FX.CloseTime)
+				if S.goal > S.t then
+					S.t = math.min(S.goal, S.t + step)
 				else
-					radialT = math.max(radialGoal, radialT - step)
+					S.t = math.max(S.goal, S.t - step)
 				end
 			end
 			local count = #subs
-			local spin = (1 - easeOutExpo(radialT)) * SPIN
 			for i, s in ipairs(subs) do
-				local offset = (i - 1) / math.max(count - 1, 1) * STAGGER
-				local local_p = math.clamp((radialT - offset) / (1 - STAGGER), 0, 1)
-				local e = easeOutBack(local_p)
-				local a = s.angle + spin
-				s.holder.Position = UDim2.fromScale(0.5 + math.cos(a) * FLOAT_RING * e, 0.5 + math.sin(a) * FLOAT_RING * e)
-				s.pop.Scale = math.max(e, 0)
-				s.holder.Visible = local_p > 0
+				local offset = (i - 1) / math.max(count - 1, 1) * FX.Stagger
+				local lp = math.clamp((S.t - offset) / (1 - FX.Stagger), 0, 1)
+				local a = s.angle + (1 - lp) * FX.Spin
+				local dist = FLOAT_RING * lp
+				s.holder.Position = UDim2.fromScale(0.5 + math.cos(a) * dist, 0.5 + math.sin(a) * dist)
+				s.pop.Scale = math.max(H.easeOutBack(lp), 0)
+				s.holder.Visible = lp > 0
 
 				local ripple = 0.5 + 0.5 * math.sin(t * 2.6 + i * 0.9)
-				local g = HALO_SUB * (0.86 + 0.12 * wave + 0.12 * ripple)
-				s.glow.Size = UDim2.fromScale(g, g)
-				s.glow.GroupTransparency = 1 - math.clamp(level + kick * 0.2, gMin, gMax)
-				local c = HALO_SUB * CORE_RATIO * (0.8 + 0.2 * wave + 0.2 * ripple)
-				s.core.Size = UDim2.fromScale(c, c)
-				s.core.GroupTransparency = 1 - coreStrength * math.clamp(level + kick * 0.2, gMin, gMax)
-				if glowColor then
-					s.glow.GroupColor3 = glowColor
-					s.core.GroupColor3 = coreColor
+				H.applyGlow(
+					s.glow,
+					FX.HaloSub * (0.94 + 0.06 * ripple),
+					1 - FX.SubGlowPeak * math.clamp(0.8 + 0.2 * ripple + kick * 0.2, 0, 1),
+					color
+				)
+				if doSparks and lp > 0 then
+					H.stepSparks(s.sparks, t, color)
 				end
 			end
 		end
@@ -4404,8 +5088,8 @@ do
 	----------------------------------------------------------------
 	-- TAP / HOLD / DRAG on the logo
 	----------------------------------------------------------------
-	hit.InputBegan:Connect(function(input)
-		if not isTap(input) or press or not floatShown then
+	O.hit.InputBegan:Connect(function(input)
+		if not isTap(input) or S.press or not S.shown then
 			return
 		end
 		local p = {
@@ -4416,29 +5100,30 @@ do
 			moved = false,
 			held = false,
 		}
-		press = p
+		S.press = p
 		task.delay(FLOAT_HOLD_TIME, function()
-			if press == p and not p.moved and not p.held and floatShown then
+			if S.press == p and not p.moved and not p.held and S.shown then
 				p.held = true
-				kick = 1
-				radialGoal = radialGoal == 1 and 0 or 1 -- hold = fan the tab icons out (hold again = tuck them back in)
-				if radialGoal == 1 then
-					fitRing()
+				S.kick = 1
+				S.goal = S.goal == 1 and 0 or 1 -- hold = fan the tab icons out (hold again = tuck them back in)
+				H.headSpring(S.goal == 1 and "in" or "out")
+				if S.goal == 1 then
+					H.fitRing()
 				end
 			end
 		end)
 	end)
 
 	keepConn(UserInputService.InputChanged:Connect(function(input)
-		local p = press
+		local p = S.press
 		if not p or not (input == p.input or input.UserInputType == Enum.UserInputType.MouseMovement) then
 			return
 		end
 		local delta = Vector2.new(input.Position.X, input.Position.Y) - p.start
-		if not p.moved and delta.Magnitude > DRAG_THRESHOLD then
-			p.moved = true -- moving the finger turns it into a drag (no tap, no hold)
-			if nudgeTween then
-				nudgeTween:Cancel()
+		if not p.moved and delta.Magnitude > 10 then
+			p.moved = true -- moving the finger turns it into a drag (no tap, no hold); 10 = pixels of travel
+			if S.nudge then
+				S.nudge:Cancel()
 			end
 			if p.held then
 				p.origin = Vector2.new(float.Position.X.Scale, float.Position.Y.Scale)
@@ -4458,14 +5143,14 @@ do
 	end))
 
 	keepConn(UserInputService.InputEnded:Connect(function(input)
-		local p = press
+		local p = S.press
 		if not p then
 			return
 		end
 		local isMouse = p.input.UserInputType == Enum.UserInputType.MouseButton1
 		if input == p.input or (isMouse and input.UserInputType == Enum.UserInputType.MouseButton1) then
-			press = nil
-			if not p.held and not p.moved and floatShown then
+			S.press = nil
+			if not p.held and not p.moved and S.shown then
 				openWindow() -- a quick tap: back to the window
 			end
 		end
@@ -4475,28 +5160,42 @@ do
 	-- called by closeWindow / openWindow
 	----------------------------------------------------------------
 	showFloat = function()
-		floatShown = true
-		press, radialT, radialGoal, charge, kick, lift = nil, 0, 0, 0, 0, 0
+		S.shown = true
+		S.shownAt = os.clock() -- colours start at red again
+		S.press, S.t, S.goal, S.charge, S.kick, S.lift = nil, 0, 0, 0, 0, 0
 		for _, s in ipairs(subs) do
 			s.holder.Visible = false
 			s.pop.Scale = 0
 		end
+		S.headGen = (S.headGen or 0) + 1 -- stop a spring that is still running from the last time
+		if S.headTween then
+			S.headTween:Cancel()
+			S.headTween = nil
+		end
+		if O.logo:FindFirstChild("Squash") then
+			O.logo.Squash.Scale = 1
+		end
 		float.Visible = true
-		floatPop.Scale = 0
-		tween(floatPop, 0.5, { Scale = 1 }, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
+		float.PopScale.Scale = 0
+		tween(float.PopScale, 0.5, { Scale = 1 }, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
+		task.delay(0.5, function() -- the source waits for the pop, then runs the cascade on the icon
+			if S.shown and alive then
+				H.headSpring("pop")
+			end
+		end)
 	end
 
 	hideFloat = function()
-		if not floatShown then
+		if not S.shown then
 			return
 		end
-		floatShown = false
-		press = nil
-		radialGoal = 0
-		tween(floatPop, 0.25, { Scale = 0 }, Enum.EasingStyle.Back, Enum.EasingDirection.In).Completed:Once(function()
-			if not floatShown then
+		S.shown = false
+		S.press = nil
+		S.goal = 0
+		tween(float.PopScale, 0.25, { Scale = 0 }, Enum.EasingStyle.Back, Enum.EasingDirection.In).Completed:Once(function()
+			if not S.shown then
 				float.Visible = false
-				radialT = 0
+				S.t = 0
 			end
 		end)
 	end
@@ -4542,93 +5241,64 @@ do -- Home page block (keeps its many locals out of the script's top level)
 		Parent = profile,
 	})
 
-	local pfp = new("ImageLabel", {
-		Name = "UserPFP",
-		AnchorPoint = Vector2.new(0, 0.5),
-		Position = UDim2.fromScale(0.05, 0.5),
-		Size = UDim2.fromScale(0.3, 0.725),
-		BackgroundColor3 = Color3.fromRGB(50, 12, 12),
-		BorderSizePixel = 0,
-		Parent = profile,
-	}, {
-		corner(0.35),
-		ratio(1),
-		new("Frame", {
-			Name = "PFPOverlay",
-			Size = UDim2.fromScale(1, 1),
-			BackgroundColor3 = PRIMARY,
-			BorderSizePixel = 0,
-			ZIndex = 2,
-		}, {
-			corner(0.35),
-			new("UIGradient", {
-				Rotation = 90,
-				Transparency = NumberSequence.new({
-					NumberSequenceKeypoint.new(0, 1),
-					NumberSequenceKeypoint.new(0.55, 1),
-					NumberSequenceKeypoint.new(1, 0.5),
+	-- HEADER (avatar) GLOW - matches the reference picture: a soft inner glow ring around the whole tile, strongest at the very edge and gone after about a
+	-- quarter of the tile, on all four sides. Its shape is fixed (nothing moves or grows). The only animation is the transparency, see the pulse block below.
+	local pfp
+	do -- (a do block: the helper is only needed here, so it takes no extra local slot in the Home block)
+		local function glowEdge(name, rotation) -- rotation: 0 = left edge, 90 = top edge, 180 = right edge, 270 = bottom edge
+			return new("Frame", {
+				Name = name,
+				Size = UDim2.fromScale(1, 1),
+				BackgroundColor3 = PRIMARY,
+				BorderSizePixel = 0,
+				ZIndex = 2,
+			}, {
+				corner(0.35),
+				new("UIGradient", {
+					Rotation = rotation,
+					Transparency = NumberSequence.new({
+						NumberSequenceKeypoint.new(0, 0),
+						NumberSequenceKeypoint.new(0.07, 0.3),
+						NumberSequenceKeypoint.new(0.2, 0.8),
+						NumberSequenceKeypoint.new(0.32, 1),
+						NumberSequenceKeypoint.new(1, 1),
+					}),
 				}),
-			}),
-		}),
-		-- red glow on the left and right edge (measured from the reference picture: strongest at the edge, gone after about a third of the tile)
-		new("Frame", {
-			Name = "PFPGlowLeft",
-			Size = UDim2.fromScale(1, 1),
-			BackgroundColor3 = PRIMARY,
-			BorderSizePixel = 0,
-			ZIndex = 2,
-		}, {
-			corner(0.35),
-			new("UIGradient", {
-				Rotation = 0,
-				Transparency = NumberSequence.new({
-					NumberSequenceKeypoint.new(0, 0.55),
-					NumberSequenceKeypoint.new(0.12, 0.75),
-					NumberSequenceKeypoint.new(0.36, 1),
-					NumberSequenceKeypoint.new(1, 1),
-				}),
-			}),
-		}),
-		new("Frame", {
-			Name = "PFPGlowRight",
-			Size = UDim2.fromScale(1, 1),
-			BackgroundColor3 = PRIMARY,
-			BorderSizePixel = 0,
-			ZIndex = 2,
-		}, {
-			corner(0.35),
-			new("UIGradient", {
-				Rotation = 0,
-				Transparency = NumberSequence.new({
-					NumberSequenceKeypoint.new(0, 1),
-					NumberSequenceKeypoint.new(0.64, 1),
-					NumberSequenceKeypoint.new(0.88, 0.75),
-					NumberSequenceKeypoint.new(1, 0.55),
-				}),
-			}),
-		}),
-	})
-
-	-- the glow on the avatar BREATHES: every glow edge slowly grows inward and gets brighter, then eases back (each with its own length, so it never looks like
-	-- a short loop). They are native looping tweens (no script work per frame) and they pause while the Home page or the window is hidden.
-	do
-		local glowTweens = {}
-		local function breathe(frame, seconds, smallOffset, bigOffset, dimTransparency)
-			local gradient = frame and frame:FindFirstChildOfClass("UIGradient")
-			if not gradient then
-				return
-			end
-			gradient.Offset = smallOffset -- starts small and dim ...
-			frame.BackgroundTransparency = dimTransparency
-			local info = TweenInfo.new(seconds, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut, -1, true)
-			local grow = TweenService:Create(gradient, info, { Offset = bigOffset }) -- ... and swells to big and bright, then back
-			local bright = TweenService:Create(frame, info, { BackgroundTransparency = 0 })
-			glowTweens[#glowTweens + 1] = grow
-			glowTweens[#glowTweens + 1] = bright
+			})
 		end
-		breathe(pfp:FindFirstChild("PFPOverlay"), 2.4, Vector2.new(0, -0.06), Vector2.new(0, 0.12), 0.4) -- bottom glow
-		breathe(pfp:FindFirstChild("PFPGlowLeft"), 3.1, Vector2.new(-0.06, 0), Vector2.new(0.12, 0), 0.45) -- left glow
-		breathe(pfp:FindFirstChild("PFPGlowRight"), 2.7, Vector2.new(0.06, 0), Vector2.new(-0.12, 0), 0.45) -- right glow
+
+		pfp = new("ImageLabel", {
+			Name = "UserPFP",
+			AnchorPoint = Vector2.new(0, 0.5),
+			Position = UDim2.fromScale(0.05, 0.5),
+			Size = UDim2.fromScale(0.3, 0.725),
+			BackgroundColor3 = Color3.fromRGB(50, 12, 12),
+			BorderSizePixel = 0,
+			Parent = profile,
+		}, {
+			corner(0.35),
+			ratio(1),
+			glowEdge("PFPOverlay", 270), -- bottom
+			glowEdge("PFPGlowTop", 90), -- top
+			glowEdge("PFPGlowLeft", 0), -- left
+			glowEdge("PFPGlowRight", 180), -- right
+		})
+	end
+
+	-- the ONLY animation of the avatar glow: BackgroundTransparency 0.1 -> 0.6 and back, in a loop. All four edges use the same tween, so the ring pulses as one.
+	-- (No offset / size animation any more.) It is a native looping tween and it pauses while the Home page or the window is hidden.
+	do
+		local GLOW_SECONDS = 1.6 -- seconds from 0.1 to 0.6 (and the same back)
+		local GLOW_FADE_TO = 0.6 -- the most transparent the glow gets (the glow starts at 0.1 and the ring edge is 0, so it really goes 0.1 -> 0.6)
+		local glowTweens = {}
+		local info = TweenInfo.new(GLOW_SECONDS, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut, -1, true)
+		for _, edgeName in ipairs({ "PFPOverlay", "PFPGlowTop", "PFPGlowLeft", "PFPGlowRight" }) do
+			local frame = pfp:FindFirstChild(edgeName)
+			if frame then
+				frame.BackgroundTransparency = 0.1
+				glowTweens[#glowTweens + 1] = TweenService:Create(frame, info, { BackgroundTransparency = GLOW_FADE_TO })
+			end
+		end
 		local function refreshGlow()
 			local on = alive and homePage.Visible and main.Visible
 			for _, tw in ipairs(glowTweens) do
@@ -4842,13 +5512,14 @@ do -- Home page block (keeps its many locals out of the script's top level)
 		local live = data.Live
 		local button = new("ImageButton", {
 			Name = "ScriptObj_" .. tostring(live and live.slug or data.Title),
-			Image = "", -- the picture arrives later (bridge.queueImage); until then a clean dark card with the deer
-			ImageColor3 = Color3.new(1, 1, 1),
+			-- source ScriptObj: the "IMAGE NOT FOUND" art in one of the 5 Arcy colours until the real picture arrives (bridge.queueImage)
+			Image = A.ScriptCard,
+			ImageColor3 = (bridge.tintFor and bridge.tintFor(live.slug)) or Color3.fromRGB(255, 56, 105),
 			ScaleType = Enum.ScaleType.Crop,
 			AutoButtonColor = false,
 			AnchorPoint = Vector2.new(0.5, 0.5),
-			BackgroundColor3 = bridge.placeholderColor and bridge.placeholderColor(live.slug) or Color3.fromRGB(35, 35, 35),
-			BackgroundTransparency = 0,
+			BackgroundColor3 = Color3.fromRGB(35, 35, 35),
+			BackgroundTransparency = 1,
 			BorderSizePixel = 0,
 			Parent = bar,
 		}, {
@@ -4861,17 +5532,6 @@ do -- Home page block (keeps its many locals out of the script's top level)
 					ColorSequenceKeypoint.new(1, Color3.fromHex("#404040")),
 				}),
 			}),
-			new("ImageLabel", {
-				Name = "Placeholder",
-				Image = A.Logo,
-				ImageTransparency = 0.7,
-				ScaleType = Enum.ScaleType.Fit,
-				AnchorPoint = Vector2.new(0.5, 0.5),
-				Position = UDim2.fromScale(0.5, 0.36),
-				Size = UDim2.fromScale(0.34, 0.5),
-				BackgroundTransparency = 1,
-				BorderSizePixel = 0,
-			}, { ratio(1) }),
 		})
 
 		local star = new("ImageButton", {
@@ -5661,8 +6321,8 @@ do -- Home page block (keeps its many locals out of the script's top level)
 			AnchorPoint = Vector2.new(0.5, 0),
 			Position = UDim2.fromScale(s.X, 0.067),
 			Size = UDim2.fromScale(0.219, 0.606),
-			BackgroundColor3 = Color3.fromRGB(60, 0, 0),
-			BackgroundTransparency = 0.55,
+			BackgroundColor3 = Theme.cur.track, -- dark shade of the Primary Color (only visible when Theme.SLIDER_FX.BackingTransparency is below 1)
+			BackgroundTransparency = Theme.SLIDER_FX.BackingTransparency, -- source: fully clear, the glass picture (TrackImage) does the glow
 			BorderSizePixel = 0,
 			Parent = sliderPanel,
 		}, { corner(0.35) })
@@ -5677,7 +6337,7 @@ do -- Home page block (keeps its many locals out of the script's top level)
 			Parent = track,
 		})
 
-		new("ImageLabel", { -- glassy track overlay
+		new("ImageLabel", { -- the pill's GLOW: the source's glass picture (rbxassetid://97199452213620), tinted with the Primary Color, over the bar (ZIndex 2 > bar 1)
 			Name = "TrackImage",
 			Image = A.SliderTrack,
 			ImageColor3 = PRIMARY,
@@ -5705,7 +6365,7 @@ do -- Home page block (keeps its many locals out of the script's top level)
 			Position = UDim2.fromScale(0.5, 0.825),
 			Size = UDim2.fromScale(0.65, 0.25),
 			BackgroundTransparency = 1,
-			ZIndex = 3,
+			ZIndex = Theme.SLIDER_FX.IconUnderGlass and 1 or 3,
 			Parent = track,
 		}, { ratio(1) })
 		local iconScale = new("UIScale", { Parent = icon })
@@ -5729,16 +6389,18 @@ do -- Home page block (keeps its many locals out of the script's top level)
 			Position = UDim2.fromScale(s.X, 0.778),
 			Size = UDim2.fromScale(0.08, 0.06),
 			BackgroundColor3 = dim(PRIMARY),
+			BackgroundTransparency = Theme.SLIDER_FX.DotSolid and 0 or 1, -- source: the toggle has no fill, the glow picture below IS the dot
 			BorderSizePixel = 0,
 			ZIndex = 2,
 			Parent = sliderPanel,
 		}, { corner(0.5), ratio(1) }) -- ratio(1): stays a round dot at full screen (the panel is no longer 16:9 there)
-		local glow = new("ImageLabel", {
+		local glow = new("ImageLabel", { -- the dot's GLOW: the source's rbxassetid://71605317317599, dim Primary when OFF, full Primary when ON
+			Name = "DotGlow",
 			Image = A.Glow,
 			ImageColor3 = dim(PRIMARY),
 			AnchorPoint = Vector2.new(0.5, 0.5),
 			Position = UDim2.fromScale(0.5, 0.5),
-			Size = UDim2.fromScale(4, 4),
+			Size = UDim2.fromScale(Theme.SLIDER_FX.DotGlowSize, Theme.SLIDER_FX.DotGlowSize),
 			BackgroundTransparency = 1,
 			Parent = dot,
 		})
@@ -5897,8 +6559,8 @@ do -- Home page block (keeps its many locals out of the script's top level)
 		Image = A.HubIcon,
 		ScaleType = Enum.ScaleType.Fit,
 		AnchorPoint = Vector2.new(0.5, 0),
-		Position = UDim2.fromScale(0.5, 0.08),
-		Size = UDim2.fromScale(0.6, 0.56),
+		Position = UDim2.fromScale(0.5, Theme.HUB_TILE.LogoY),
+		Size = UDim2.fromScale(Theme.HUB_TILE.LogoW, Theme.HUB_TILE.LogoH),
 		BackgroundTransparency = 1,
 		BorderSizePixel = 0,
 		Parent = hubInner,
@@ -5908,7 +6570,7 @@ do -- Home page block (keeps its many locals out of the script's top level)
 		Text = "Arceus Hub",
 		FontFace = FONT.Title,
 		AnchorPoint = Vector2.new(0.5, 0),
-		Position = UDim2.fromScale(0.5, 0.7),
+		Position = UDim2.fromScale(0.5, Theme.HUB_TILE.NameY),
 		Size = UDim2.fromScale(0.86, 0.2),
 		Parent = hubInner,
 	})
@@ -7326,6 +7988,7 @@ do
 
 		bridge.describe = describe
 		bridge.placeholderColor = placeholderColor
+		bridge.tintFor = tintFor
 		bridge.queueImage = queueImage
 		bridge.isFav = function(slug)
 			return favs[slug] ~= nil
@@ -7506,7 +8169,7 @@ do
 					local on = entry.key == key
 					entry.button.FontFace = on and FONT.Title or FONT.Body
 					tween(entry.button, 0.2, { TextColor3 = on and TEXT or DIM_TEXT })
-					tween(entry.dot, 0.25, { BackgroundTransparency = on and 0 or 1 })
+					tween(entry.dot, 0.25, { ImageTransparency = on and 0 or 1 }) -- source: img:Tween(tweens.default, { ImageTransparency = 0 / 1 })
 				end
 				if not silent then
 					onSelect(key, group.texts[key])
@@ -7529,16 +8192,22 @@ do
 				}, {
 					new("UIPadding", { PaddingLeft = UDim.new(0, 8), PaddingRight = UDim.new(0, 8) }),
 				})
-				local dot = new("Frame", {
+				-- source (FilterSelector): the dot is the glow picture rbxassetid://71605317317599 tinted with the Primary Color, one button high,
+				-- its top edge at the middle of the button (anchor .5 / 0, position .5 / .5), invisible until its filter is chosen.
+				-- Its size is set by the page layout below (the row is .1 of the page high).
+				local dot = new("ImageLabel", {
 					Name = "Dot",
-					AnchorPoint = Vector2.new(0.5, 0.5),
-					BackgroundColor3 = PRIMARY,
+					Image = "rbxassetid://71605317317599",
+					ImageColor3 = PRIMARY,
+					ImageTransparency = 1,
+					ScaleType = Enum.ScaleType.Fit,
+					AnchorPoint = Vector2.new(0.5, 0),
 					BackgroundTransparency = 1,
 					BorderSizePixel = 0,
-					Size = UDim2.fromOffset(4, 4),
-					Position = UDim2.new(0.5, 0, 0.5, 14),
+					Size = UDim2.fromOffset(32, 32),
+					Position = UDim2.fromScale(0.5, 0.5),
 					Parent = button,
-				}, { corner(0.5) })
+				})
 				group.buttons[option.key] = { key = option.key, button = button, dot = dot }
 				button.Activated:Connect(function()
 					group.select(option.key, false)
@@ -7655,13 +8324,15 @@ do
 			local pop = new("UIScale", { Scale = 0.9 })
 			local card = new("ImageButton", {
 				Name = "ScriptObj_" .. data.slug,
-				Image = "", -- the picture arrives later (showPicture); until then a clean dark card with the deer
-				ImageColor3 = Color3.new(1, 1, 1),
+				-- source ScriptObj: Image = rbxassetid://71177623238811 (the "IMAGE NOT FOUND" art) tinted with a random Arcy colour (getRandomAIColor);
+				-- when the real picture arrives (showPicture) the tint becomes white. A card whose picture never loads keeps this art.
+				Image = A.ScriptCard,
+				ImageColor3 = tintFor(data.slug),
 				ScaleType = Enum.ScaleType.Crop,
 				AnchorPoint = feed.isBar and Vector2.new(0.5, 0.5) or Vector2.new(0, 0), -- carousel cards are placed by their centre
 				AutoButtonColor = false,
-				BackgroundColor3 = placeholderColor(data.slug),
-				BackgroundTransparency = 0,
+				BackgroundColor3 = Color3.fromRGB(35, 35, 35),
+				BackgroundTransparency = 1,
 				BorderSizePixel = 0,
 				LayoutOrder = index,
 				Parent = feed.container,
@@ -7675,17 +8346,6 @@ do
 						ColorSequenceKeypoint.new(1, Color3.fromHex("#404040")),
 					}),
 				}),
-				new("ImageLabel", {
-					Name = "Placeholder",
-					Image = A.Logo,
-					ImageTransparency = 0.7,
-					ScaleType = Enum.ScaleType.Fit,
-					AnchorPoint = Vector2.new(0.5, 0.5),
-					Position = UDim2.fromScale(0.5, 0.36),
-					Size = UDim2.fromScale(0.34, 0.5),
-					BackgroundTransparency = 1,
-					BorderSizePixel = 0,
-				}, { ratio(1) }),
 				new("Frame", {
 					Name = "Shade", -- dark veil: the cards next to the middle one of the carousel get it (see arrangeBar); invisible everywhere else
 					Size = UDim2.fromScale(1, 1),
@@ -9627,11 +10287,11 @@ do
 				local bgCorner = new("UICorner", { CornerRadius = radius })
 				local bg = new("ImageLabel", {
 					Name = "CardBackground",
-					Image = "", -- the picture arrives in setPicture; until then (or without one) a dark tint of the card's colour
-					ImageColor3 = Color3.new(1, 1, 1),
+					Image = A.ScriptCard, -- source: scr.Image or rbxassetid://71177623238811 with ImageColor3 #202020; setPicture puts the real picture on it
+					ImageColor3 = Color3.fromHex("#202020"),
 					ScaleType = Enum.ScaleType.Crop,
 					BackgroundColor3 = placeholderColor(data.slug),
-					BackgroundTransparency = 0,
+					BackgroundTransparency = 1,
 					BorderSizePixel = 0,
 					Size = UDim2.fromScale(1, 1),
 					ZIndex = 1,
@@ -9713,14 +10373,14 @@ do
 				}, { glowScale })
 				local thumb = new("ImageLabel", {
 					Name = "Thumbnail",
-					Image = "",
+					Image = A.ScriptCard, -- source: innerImg Image = scr.Image or rbxassetid://71177623238811
 					ImageColor3 = Color3.new(1, 1, 1),
 					ScaleType = Enum.ScaleType.Crop,
 					AnchorPoint = Vector2.new(0.5, 0.5),
 					Position = UDim2.fromScale(0.5, 0.5),
 					Size = UDim2.fromScale(0.6, 0.6),
 					BackgroundColor3 = placeholderColor(data.slug),
-					BackgroundTransparency = 0,
+					BackgroundTransparency = 1,
 					BorderSizePixel = 0,
 					Parent = glow,
 				}, {
@@ -9731,22 +10391,9 @@ do
 						AspectRatio = 16 / 9,
 					}),
 				})
-				local thumbDeer = new("ImageLabel", { -- shown only while there is no picture
-					Name = "Placeholder",
-					Image = A.Logo,
-					ImageTransparency = 0.6,
-					ScaleType = Enum.ScaleType.Fit,
-					AnchorPoint = Vector2.new(0.5, 0.5),
-					Position = UDim2.fromScale(0.5, 0.5),
-					Size = UDim2.fromScale(0.35, 0.6),
-					BackgroundTransparency = 1,
-					BorderSizePixel = 0,
-					Parent = thumb,
-				}, { ratio(1) })
 				fadeIn(glow, "ImageTransparency", 0.1)
 				fadeIn(thumb, "ImageTransparency", 0.1)
 				fadeIn(thumb, "BackgroundTransparency", 0.1)
-				fadeIn(thumbDeer, "ImageTransparency", 0.1)
 
 				-- CREATION DATE
 				local createdLabel = label({
@@ -10083,6 +10730,19 @@ do
 					return nil
 				end
 
+				-- what Execute runs: the copy from the script's own page first (the source's CloudScriptInfo always uses FetchDetails, the list copy can be cut),
+				-- else the copy that came with the list
+				local function getRunSource()
+					if data.slug then
+						local info = fetchDetails(data.slug)
+						if info and type(info.script) == "string" and string.find(info.script, "%S") then
+							data.script = info.script
+							return info.script
+						end
+					end
+					return getSource()
+				end
+
 				-- runs a tile's work off the UI thread (it may download the script), and ignores a second tap on the same tile for half a second
 				local busy = {}
 				local function perform(name, icon, work)
@@ -10166,7 +10826,7 @@ do
 				runIcon = makeTile("ExecuteTile", UDim2.fromScale(1.06, 1.1075), UDim2.fromScale(0.35, 0.35), 1.117, A.RunTile,
 					A.RunIcon, UDim2.fromScale(0.3, 0.3), nil, function()
 						perform("execute", runIcon, function()
-							local src = getSource()
+							local src = getRunSource()
 							if not src then
 								fxFail(runIcon)
 								errorToast("Execute", "Couldn't get the script. Check your connection")
@@ -10230,11 +10890,9 @@ do
 						return
 					end
 					bg.Image = asset -- the window backdrop keeps the whole picture (the blur looks fine behind the shade)
+					bg.ImageColor3 = Color3.new(1, 1, 1) -- source: loadimage sets ImageColor3 to white
 					thumb.Image = asset
 					applyTrim(thumb, url)
-					if thumbDeer.Parent then
-						thumbDeer:Destroy()
-					end
 				end
 				task.spawn(function()
 					local asset = data.imageUrl and imageAssets[data.imageUrl]
@@ -10341,9 +10999,9 @@ do
 			for _, group in ipairs({ topFilters, gridFilters }) do
 				for _, entry in pairs(group.buttons) do
 					entry.button.TextSize = fs
-					local d = math.max(3, math.floor(fs * 0.3))
-					entry.dot.Size = UDim2.fromOffset(d, d)
-					entry.dot.Position = UDim2.new(0.5, 0, 0.5, math.floor(fs * 0.95))
+					local g = math.floor(H * 0.1) -- source FilterSelector: the glow picture is as high as the button (the filter row is .1 of the page)
+					entry.dot.Size = UDim2.fromOffset(g, g)
+					entry.dot.Position = UDim2.fromScale(0.5, 0.5)
 				end
 			end
 
@@ -12595,7 +13253,7 @@ do
 					FontFace = FONT.Title,
 					AnchorPoint = CENTER,
 					Position = UDim2.fromScale(0.5, 0.5),
-					Size = UDim2.fromScale(0.9, 0.5),
+					Size = UDim2.fromScale(1, 0.65), -- source: the label is 1 x .65 of the pill (the old 0.94 x 0.72 box was limited by its width, so the text came out about 20% smaller than on the real window)
 				}),
 			})
 			pressFx(btn)
@@ -13134,20 +13792,51 @@ do
 			local PLATE = Color3.fromRGB(12, 12, 12) -- box / dropdown fill
 			-- SWITCH / DROPDOWN LOOK (from the reference picture): dark plate + thick grey rim + white rounded knob; ON = solid red with a dark red rim
 			local SWITCH_OFF = Color3.fromRGB(14, 14, 14) -- switch OFF fill
-			local RIM_OFF = Color3.fromRGB(68, 64, 64) -- thick grey rim of the switch (OFF) and of the dropdown
+			local RIM_OFF = Color3.fromRGB(40, 40, 40) -- thin grey rim of the switch (OFF), the number box and the dropdown (measured on the real Arceus window: 40, 40, 40)
 			local RIM_ON = Theme.sh.rim -- rim of the switch when ON
 			-- BUTTON LOOK: UP / DOWN, the library Button, - / + and the number box all read this table, so they always match
 			local BTN = {
-				H = 0.52, -- height (fraction of the row)
+				H = 0.485, -- height of UP / DOWN / buttons (fraction of the row; real window: 32 px of a 66 px row)
+				BOXH = 0.64, -- height of the number box (real window: 42 px of 66)
+				SQ = 0.45, -- the - / + squares (real window: 27 px of 66)
 				CORNER = 0.22, -- corner roundness
 				PAD = 0.27, -- text padding inside a button
-				RIGHT = 0.976, -- right edge of the buttons (fraction of the row)
+				RIGHT = 0.9716, -- right edge of the buttons (fraction of the row)
 				PRESS = Theme.sh.press, -- red while held
 				RIM = RIM_OFF, -- rim of the number box (same grey as the dropdown / switch)
-				RIMW = 2.5, -- rim thickness
+				RIMW = 0.05, -- rim of the number box = this FRACTION of the box height (was a fixed 3 px: far too thick on a small window)
+				SWRIM = Color3.fromRGB(58, 56, 56), -- grey rim of the switch when OFF (thin, like the real Arceus switch)
+				SWRIMW = 0.055, -- rim of the switch = this fraction of the switch height (was a fixed 4 px)
+				DDRIMW = 0.05, -- rim of the dropdown button = this fraction of its height (was a fixed 3 px)
+				RIM_MIN = 1, -- the rims are never thinner than this (px) ...
+				RIM_MAX = 2, -- ... or thicker than this, at any window size
 			}
-			local KNOB_SIZE, KNOB_PRESS = 0.78, 0.62 -- knob height (fraction of the switch) at rest / while the finger is down
-			local KNOB_OFF_X, KNOB_ON_X = 0.3, 0.7 -- where the knob sits (fraction of the switch width)
+			local KNOB_SIZE, KNOB_PRESS = 0.78, 0.66 -- knob height (fraction of the switch) at rest / while the finger is down (real window: 25 px knob in a 40 px switch)
+			local KNOB_OFF_X, KNOB_ON_X = 0.265, 0.735 -- where the knob sits (fraction of the switch width)
+			-- A UIStroke is measured in PIXELS but this window is scaled (small / big / detached), so the old fixed 3-4 px rims looked huge on a small window
+			-- and did not match the real Arceus v5 controls. rim() makes a stroke whose thickness follows the height of the control it sits on.
+			local function rim(color, fraction, minPx, maxPx)
+				local stroke = new("UIStroke", { Color = color, Thickness = 1, ApplyStrokeMode = Enum.ApplyStrokeMode.Border })
+				local conn
+				local function refit()
+					local owner = stroke.Parent
+					if owner and owner:IsA("GuiObject") and owner.AbsoluteSize.Y > 0 then
+						stroke.Thickness = math.clamp(owner.AbsoluteSize.Y * fraction, minPx or BTN.RIM_MIN, maxPx or BTN.RIM_MAX)
+					end
+				end
+				stroke:GetPropertyChangedSignal("Parent"):Connect(function()
+					if conn then
+						conn:Disconnect()
+						conn = nil
+					end
+					local owner = stroke.Parent
+					if owner and owner:IsA("GuiObject") then
+						conn = owner:GetPropertyChangedSignal("AbsoluteSize"):Connect(refit)
+						refit()
+					end
+				end)
+				return stroke
+			end
 			Theme.onChange(function(theme) -- Settings > Primary Color: the hub's shades follow the chosen colour (what is already on screen is repainted by Theme.repaint)
 				local sh = theme.sh
 				RED, TILE_RED, LINE_RED, RIM_ON, BTN.PRESS = sh.bright, sh.tile, sh.line, sh.rim, sh.press
@@ -13155,12 +13844,12 @@ do
 			local function switchLook(track, on, animate)
 				local stroke = track:FindFirstChildOfClass("UIStroke")
 				local fill = on and RED or SWITCH_OFF
-				local rim = on and RIM_ON or RIM_OFF
+				local rim = on and RIM_ON or BTN.SWRIM
 				local shade = on and 0 or 0.1
 				if animate then
-					tween(track, 0.25, { BackgroundColor3 = fill, BackgroundTransparency = shade })
+					tween(track, 0.15, { BackgroundColor3 = fill, BackgroundTransparency = shade })
 					if stroke then
-						tween(stroke, 0.25, { Color = rim })
+						tween(stroke, 0.15, { Color = rim })
 					end
 				else
 					track.BackgroundColor3 = fill
@@ -13173,7 +13862,7 @@ do
 			local HUB_RATIO = (0.925 * 16) / ((0.975 - PLUGIN_Y) * 9) -- same proportions as the Hub, also in the detached window
 			local ROW_X, ROW_W = 0.0859, 0.893
 			local TAB_X, TAB_SIZE, TAB_STEP, TAB_Y = 0.0378, 0.0594, 0.1306, 0.1289
-			local ROW_H, SECTION_H, LABEL_H, GAP = 0.15, 0.1, 0.11, 0.022 -- fractions of the window height
+			local ROW_H, SECTION_H, LABEL_H, GAP = 0.2144, 0.1, 0.11, 0.0235 -- fractions of the window height (real Arceus window: row 66 px, 7 px between rows, in a 308 px high page)
 			local MAX_LIST = 5 -- a dropdown shows this many options, the rest scrolls
 			local ICONS = {
 				home = A.Home, executor = A.Executor, script = A.Executor, editor = A.Executor, cloud = A.ScriptHub, scripthub = A.ScriptHub,
@@ -13268,6 +13957,9 @@ do
 
 			local function createWindow(first, ...)
 				local wo = norm(first, ...)
+				if api.SetLeftGlow then
+					api.SetLeftGlow(true) -- a Library window has the Hub's icon column, so it gets the same left glow
+				end
 				if window and window.Frame and window.Frame.Parent then
 					pcall(function()
 						window.Frame:Destroy() -- a second window replaces the first
@@ -13384,13 +14076,13 @@ do
 					local title = tostring(field(to, "Title", "Name", "Text") or ("Tab " .. (#tabs + 1)))
 					local tab = { Title = title, Header = tostring(field(to, "Header", "Subtitle") or title), items = {}, order = 0 }
 
-					local layout = new("UIListLayout", { SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 8) })
+					local layout = new("UIListLayout", { SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 7) })
 					local scroll = new("ScrollingFrame", {
 						Name = "Page_" .. title,
 						BackgroundTransparency = 1,
 						BorderSizePixel = 0,
-						Position = UDim2.fromScale(ROW_X, 0.03),
-						Size = UDim2.fromScale(ROW_W, 0.94),
+						Position = UDim2.fromScale(ROW_X, 0.043),
+						Size = UDim2.fromScale(ROW_W, 0.957), -- runs down to the bottom of the window like the real one; longer pages scroll
 						CanvasSize = UDim2.new(0, 0, 0, 0),
 						AutomaticCanvasSize = Enum.AutomaticSize.Y,
 						ScrollingDirection = Enum.ScrollingDirection.Y,
@@ -13470,8 +14162,8 @@ do
 								FontFace = FONT.Body,
 								TextXAlignment = Enum.TextXAlignment.Left,
 								TextYAlignment = Enum.TextYAlignment.Bottom,
-								Position = UDim2.fromScale(0.024, 0.08),
-								Size = UDim2.fromScale(0.5, 0.4),
+								Position = UDim2.fromScale(0.024, 0.16),
+								Size = UDim2.fromScale(0.5, 0.36),
 								Parent = frame,
 							})
 							label({
@@ -13482,8 +14174,8 @@ do
 								TextYAlignment = Enum.TextYAlignment.Top,
 								TextTransparency = 0.5, -- source: description at .5
 								AnchorPoint = Vector2.new(0, 1),
-								Position = UDim2.fromScale(0.024, 0.86),
-								Size = UDim2.fromScale(0.55, 0.27),
+								Position = UDim2.fromScale(0.024, 0.85),
+								Size = UDim2.fromScale(0.55, 0.25),
 								Parent = frame,
 							})
 						else
@@ -13516,7 +14208,7 @@ do
 							FontFace = FONT.Title,
 							TextXAlignment = Enum.TextXAlignment.Left,
 							AnchorPoint = Vector2.new(0, 1),
-							Position = UDim2.fromScale(0.01, 0.8),
+							Position = UDim2.fromScale(0.026, 0.72),
 							Size = UDim2.fromScale(0.6, 0.55),
 							Parent = frame,
 						})
@@ -13570,13 +14262,13 @@ do
 							Text = "",
 							AutoButtonColor = false,
 							AnchorPoint = Vector2.new(1, 0.5),
-							Position = UDim2.fromScale(0.975, 0.5),
-							Size = UDim2.fromScale(0.1, 0.58),
+							Position = UDim2.fromScale(0.979, 0.5),
+							Size = UDim2.fromScale(0.15, 0.606),
 							BackgroundColor3 = on and RED or SWITCH_OFF,
 							BackgroundTransparency = on and 0 or 0.1,
 							BorderSizePixel = 0,
 							Parent = frame,
-						}, { corner(0.4), new("UIStroke", { Color = on and RIM_ON or RIM_OFF, Thickness = 2.5 }), ratio(1.45) })
+						}, { corner(0.5), rim(on and RIM_ON or BTN.SWRIM, BTN.SWRIMW), ratio(1.95) })
 						local knob = new("Frame", {
 							Name = "Knob",
 							AnchorPoint = CENTER,
@@ -13585,7 +14277,7 @@ do
 							BackgroundColor3 = WHITE,
 							BorderSizePixel = 0,
 							Parent = track,
-						}, { corner(0.4), ratio(1) })
+						}, { corner(0.5), ratio(1) })
 						pressFx(track)
 						-- the knob squeezes while the finger is down and springs back when it lets go
 						track.InputBegan:Connect(function(input)
@@ -13606,7 +14298,7 @@ do
 							end
 							on = value
 							win.Flags[flag] = on
-							tween(knob, 0.3, { Position = UDim2.fromScale(on and KNOB_ON_X or KNOB_OFF_X, 0.5) }, Enum.EasingStyle.Back)
+							tween(knob, 0.18, { Position = UDim2.fromScale(on and KNOB_ON_X or KNOB_OFF_X, 0.5) }, Enum.EasingStyle.Back)
 							switchLook(track, on, true)
 							if not silent then
 								fire(callback, on)
@@ -13681,14 +14373,15 @@ do
 							TextScaled = true,
 							ClearTextOnFocus = false,
 							AnchorPoint = CENTER,
-							Position = UDim2.fromScale(0.8383, 0.5),
-							Size = UDim2.fromScale(0.1807, BTN.H),
-							BackgroundColor3 = Color3.fromRGB(10, 10, 10),
+							Position = UDim2.fromScale(0.7769, 0.5),
+							Size = UDim2.fromScale(0.247, BTN.BOXH),
+							BackgroundColor3 = Color3.fromRGB(15, 15, 15),
 							BorderSizePixel = 0,
 							Parent = frame,
 						}, {
-							corner(BTN.CORNER),
-							new("UIPadding", { PaddingTop = UDim.new(BTN.PAD, 0), PaddingBottom = UDim.new(BTN.PAD, 0) }),
+							corner(0.33),
+							rim(BTN.RIM, BTN.RIMW),
+							new("UIPadding", { PaddingTop = UDim.new(0.3, 0), PaddingBottom = UDim.new(0.3, 0) }),
 						})
 						local function set(v, silent)
 							v = math.clamp(math.floor(v / step + 0.5) * step, min, max)
@@ -13716,7 +14409,7 @@ do
 								AutoButtonColor = false,
 								AnchorPoint = Vector2.new(1, 0.5),
 								Position = UDim2.fromScale(x, 0.5),
-								Size = UDim2.fromScale(0.5, BTN.H), -- the aspect ratio makes it a square as tall as UP / DOWN
+								Size = UDim2.fromScale(0.5, BTN.SQ), -- the aspect ratio makes it a square
 								BackgroundColor3 = RED,
 								BorderSizePixel = 0,
 								Parent = frame,
@@ -13730,7 +14423,7 @@ do
 								set(value + delta)
 							end)
 						end
-						square("-", 0.737, -step)
+						square("-", 0.6384, -step)
 						square("+", BTN.RIGHT, step)
 
 						local el = {}
@@ -13770,7 +14463,7 @@ do
 							Parent = frame,
 						}, {
 							corner(0.3),
-							new("UIStroke", { Color = EDGE, Thickness = 1.5, ApplyStrokeMode = Enum.ApplyStrokeMode.Border }), -- Border: no outline around the typed / placeholder text
+							rim(EDGE, 0.04, 1, 1.5), -- Border: no outline around the typed / placeholder text
 							new("UIPadding", {
 								PaddingTop = UDim.new(0.2, 0),
 								PaddingBottom = UDim.new(0.2, 0),
@@ -13909,7 +14602,7 @@ do
 							BackgroundTransparency = 0.2,
 							BorderSizePixel = 0,
 							Parent = frame,
-						}, { corner(0.35), new("UIStroke", { Color = RIM_OFF, Thickness = 2.5 }) })
+						}, { corner(0.35), rim(RIM_OFF, BTN.DDRIMW) })
 						local shown = label({
 							Name = "Selected",
 							Text = shownText(),
@@ -13951,7 +14644,7 @@ do
 							Parent = stage,
 						}, {
 							corner(0.12),
-							new("UIStroke", { Color = RIM_OFF, Thickness = 2 }),
+							rim(RIM_OFF, 0.012, 1, 1.5),
 							new("UIPadding", {
 								PaddingTop = UDim.new(0, 3),
 								PaddingBottom = UDim.new(0, 3),
@@ -14219,6 +14912,9 @@ do
 				OnShown = function(fn) -- called every time the extension's content appears (opened or detached); use it to replay an intro animation
 					entry.onShown = type(fn) == "function" and fn or nil
 				end,
+				SetLeftGlow = function(on) -- the dark glow down the left edge of the detached window (laid over the icon column). Call it while the extension starts. The Hub and every api.Library window switch it on by themselves
+					entry.leftGlow = on ~= false
+				end,
 			}
 			api.Library = makeLibrary(api) -- the Hub's look as a toolkit: tabs, sections, toggles, dropdowns ... (see HUB LIBRARY above)
 			return api
@@ -14316,6 +15012,30 @@ do
 				ZIndex = 700,
 				Parent = win,
 			}, { corner(0.03) })
+
+			-- LEFT GLOW: a black gradient down the whole left edge (title bar included), drawn OVER the logo, the icon column and the left end of the rows - like the
+			-- real window, where those icons are dimmed by it. It is made of scale only, so it is the same share of the window at the small / big size, it does not
+			-- take taps (a Frame that is not Active lets them through to the tabs under it), and it fades in / out with the window.
+			local winGlow = nil
+			if entry.leftGlow then
+				winGlow = new("Frame", {
+					Name = "LeftGlow",
+					BackgroundColor3 = Color3.new(0, 0, 0),
+					BackgroundTransparency = 1, -- fades in with the pop animation below
+					BorderSizePixel = 0,
+					Size = UDim2.fromScale(LEFT_GLOW.Width, 1),
+					Active = false,
+					ZIndex = LEFT_GLOW.ZIndex,
+					Parent = win,
+				}, {
+					new("UIGradient", {
+						Transparency = NumberSequence.new({
+							NumberSequenceKeypoint.new(0, 1 - LEFT_GLOW.Strength),
+							NumberSequenceKeypoint.new(1, 1),
+						}),
+					}),
+				})
+			end
 
 			-- the extension area (under the title bar)
 			local body = new("Frame", {
@@ -14443,6 +15163,9 @@ do
 				tween(popScale, 0.2, { Scale = 0.88 }, Enum.EasingStyle.Back, Enum.EasingDirection.In)
 				tween(win, 0.2, { BackgroundTransparency = 1 })
 				tween(winArt, 0.2, { ImageTransparency = 1 })
+				if winGlow then
+					tween(winGlow, 0.2, { BackgroundTransparency = 1 })
+				end
 				task.delay(0.2, function()
 					if entry.float == win then
 						attachPlugin(entry)
@@ -14479,6 +15202,9 @@ do
 			tween(popScale, 0.34, { Scale = 1 }, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
 			tween(win, 0.28, { BackgroundTransparency = BG_BASE_TRANSPARENCY })
 			tween(winArt, 0.28, { ImageTransparency = BG_IMAGE_TRANSPARENCY })
+			if winGlow then
+				tween(winGlow, 0.28, { BackgroundTransparency = 0 })
+			end
 			playShown(entry)
 		end
 
@@ -14918,8 +15644,10 @@ do
 				showToast({ style = "error", title = "Install", text = "Paste the extension link (it starts with https://)" })
 				return
 			end
-			for _, saved in ipairs(savedUrls) do
-				if saved == url then
+			-- "already installed" only when its tile is really there. A link that is only in the saved list (it failed to load at start-up: bad link,
+			-- no internet) used to answer "already installed" and do nothing; now the install simply runs again and the list keeps ONE copy of the url.
+			for _, p in ipairs(plugins) do
+				if p.url == url then
 					showToast({ style = "info", title = "Install", text = "That extension is already installed." })
 					return
 				end
@@ -14983,8 +15711,9 @@ do
 		--   * the setting rows (dark glass plate, white title, grey description, the control on the right).
 		-- Fly and Aimbot really work (see LIVE FEATURES below); every change also calls Hooks.OnHub(setting, value) and is kept in homeRefs.hub.
 		local function buildHub(api)
+			api.SetLeftGlow(true) -- the dark glow behind the icon column when the Hub is detached (see LEFT_GLOW)
 			local HUB_AIM_ICON = "rbxassetid://72933494617424" -- aimbot tab icon (set nil to go back to the drawn crosshair)
-			local HUB_FLY_ICON = "rbxassetid://89392728850427" -- fly (fling) tab icon (set nil to go back to the drawn feather)
+			local HUB_FLY_ICON = "rbxassetid://113543073087465" -- fly tab icon (the feather). Set nil to go back to the drawn feather
 			local RED = Theme.sh.bright -- switch, UP / DOWN, + / - (Primary Color: Red = 254, 0, 0 sampled from the screenshot)
 			local TILE_RED = Theme.sh.tile -- the active icon tile
 			local LINE_RED = Theme.sh.line -- the line under the page title
@@ -14993,20 +15722,51 @@ do
 			local PLATE = Color3.fromRGB(12, 12, 12) -- speed box / dropdown fill
 			-- SWITCH / DROPDOWN LOOK (from the reference picture): dark plate + thick grey rim + white rounded knob; ON = solid red with a dark red rim
 			local SWITCH_OFF = Color3.fromRGB(14, 14, 14) -- switch OFF fill
-			local RIM_OFF = Color3.fromRGB(68, 64, 64) -- thick grey rim of the switch (OFF) and of the dropdown
+			local RIM_OFF = Color3.fromRGB(40, 40, 40) -- thin grey rim of the switch (OFF), the number box and the dropdown (measured on the real Arceus window: 40, 40, 40)
 			local RIM_ON = Theme.sh.rim -- rim of the switch when ON
 			-- BUTTON LOOK: UP / DOWN, the library Button, - / + and the number box all read this table, so they always match
 			local BTN = {
-				H = 0.52, -- height (fraction of the row)
+				H = 0.485, -- height of UP / DOWN / buttons (fraction of the row; real window: 32 px of a 66 px row)
+				BOXH = 0.64, -- height of the number box (real window: 42 px of 66)
+				SQ = 0.45, -- the - / + squares (real window: 27 px of 66)
 				CORNER = 0.22, -- corner roundness
 				PAD = 0.27, -- text padding inside a button
-				RIGHT = 0.976, -- right edge of the buttons (fraction of the row)
+				RIGHT = 0.9716, -- right edge of the buttons (fraction of the row)
 				PRESS = Theme.sh.press, -- red while held
 				RIM = RIM_OFF, -- rim of the number box (same grey as the dropdown / switch)
-				RIMW = 2.5, -- rim thickness
+				RIMW = 0.05, -- rim of the number box = this FRACTION of the box height (was a fixed 3 px: far too thick on a small window)
+				SWRIM = Color3.fromRGB(58, 56, 56), -- grey rim of the switch when OFF (thin, like the real Arceus switch)
+				SWRIMW = 0.055, -- rim of the switch = this fraction of the switch height (was a fixed 4 px)
+				DDRIMW = 0.05, -- rim of the dropdown button = this fraction of its height (was a fixed 3 px)
+				RIM_MIN = 1, -- the rims are never thinner than this (px) ...
+				RIM_MAX = 2, -- ... or thicker than this, at any window size
 			}
-			local KNOB_SIZE, KNOB_PRESS = 0.78, 0.62 -- knob height (fraction of the switch) at rest / while the finger is down
-			local KNOB_OFF_X, KNOB_ON_X = 0.3, 0.7 -- where the knob sits (fraction of the switch width)
+			local KNOB_SIZE, KNOB_PRESS = 0.78, 0.66 -- knob height (fraction of the switch) at rest / while the finger is down (real window: 25 px knob in a 40 px switch)
+			local KNOB_OFF_X, KNOB_ON_X = 0.265, 0.735 -- where the knob sits (fraction of the switch width)
+			-- A UIStroke is measured in PIXELS but this window is scaled (small / big / detached), so the old fixed 3-4 px rims looked huge on a small window
+			-- and did not match the real Arceus v5 controls. rim() makes a stroke whose thickness follows the height of the control it sits on.
+			local function rim(color, fraction, minPx, maxPx)
+				local stroke = new("UIStroke", { Color = color, Thickness = 1, ApplyStrokeMode = Enum.ApplyStrokeMode.Border })
+				local conn
+				local function refit()
+					local owner = stroke.Parent
+					if owner and owner:IsA("GuiObject") and owner.AbsoluteSize.Y > 0 then
+						stroke.Thickness = math.clamp(owner.AbsoluteSize.Y * fraction, minPx or BTN.RIM_MIN, maxPx or BTN.RIM_MAX)
+					end
+				end
+				stroke:GetPropertyChangedSignal("Parent"):Connect(function()
+					if conn then
+						conn:Disconnect()
+						conn = nil
+					end
+					local owner = stroke.Parent
+					if owner and owner:IsA("GuiObject") then
+						conn = owner:GetPropertyChangedSignal("AbsoluteSize"):Connect(refit)
+						refit()
+					end
+				end)
+				return stroke
+			end
 			Theme.onChange(function(theme) -- Settings > Primary Color: the hub's shades follow the chosen colour (what is already on screen is repainted by Theme.repaint)
 				local sh = theme.sh
 				RED, TILE_RED, LINE_RED, RIM_ON, BTN.PRESS = sh.bright, sh.tile, sh.line, sh.rim, sh.press
@@ -15014,12 +15774,12 @@ do
 			local function switchLook(track, on, animate)
 				local stroke = track:FindFirstChildOfClass("UIStroke")
 				local fill = on and RED or SWITCH_OFF
-				local rim = on and RIM_ON or RIM_OFF
+				local rim = on and RIM_ON or BTN.SWRIM
 				local shade = on and 0 or 0.1
 				if animate then
-					tween(track, 0.25, { BackgroundColor3 = fill, BackgroundTransparency = shade })
+					tween(track, 0.15, { BackgroundColor3 = fill, BackgroundTransparency = shade })
 					if stroke then
-						tween(stroke, 0.25, { Color = rim })
+						tween(stroke, 0.15, { Color = rim })
 					end
 				else
 					track.BackgroundColor3 = fill
@@ -15033,13 +15793,13 @@ do
 			-- the stage keeps the screenshot's proportions (in the detached window too); every number below is a fraction of it
 			local HUB_RATIO = (0.925 * 16) / ((0.975 - PLUGIN_Y) * 9)
 			local ROW_X, ROW_W = 0.0859, 0.893
-			local ROW_Y, ROW_STEP, ROW_H = 0.1368, 0.1551, 0.1357
+			local ROW_Y, ROW_STEP, ROW_H = 0.165, 0.2372, 0.2144 -- measured on the real window: rows 66 px high, 73 px apart (a 308 px high page)
 			local TAB_X, TAB_SIZE = 0.0378, 0.0594
-			local TITLE_X, TITLE_Y, LINE_Y = 0.1071, 0.0592, 0.1126
+			local TITLE_X, TITLE_Y, LINE_Y = 0.1071, 0.0625, 0.1407
 
 			local state = {
 				Fly = false, FlyUp = false, FlyDown = false, Speed = 5, FlyMode = "CFrame",
-				Aimbot = false, TeamCheck = false, Fov = 120,
+				Aimbot = false, WallCheck = false, TeamCheck = false, ShowTarget = false, Fov = 120,
 			}
 			homeRefs.hub = state
 			-- LIVE FEATURES: Fly + Aimbot (client side). changed() below feeds every toggle / button / stepper into features.apply(name, value),
@@ -15062,10 +15822,10 @@ do
 
 				local S = {
 					Fly = false, FlyUp = false, FlyDown = false, Speed = 5, FlyMode = "CFrame",
-					Aimbot = false, TeamCheck = false, Fov = 120,
+					Aimbot = false, WallCheck = false, TeamCheck = false, ShowTarget = false, Fov = 120,
 				}
 				local fly = { conn = nil, mover = nil, gyro = nil }
-				local aim = { bound = false, ringGui = nil, ring = nil }
+				local aim = { bound = false, ringGui = nil, ring = nil, mark = nil, markChar = nil } -- mark = the Show Target highlight, markChar = the character it sits on
 
 				----------------------------------------------------------------
 				-- FLY
@@ -15207,6 +15967,20 @@ do
 				----------------------------------------------------------------
 				-- AIMBOT
 				----------------------------------------------------------------
+				-- WALL CHECK: true when nothing solid is between the camera and the part (the player's own character and the target are ignored)
+				local wallParams = RaycastParams.new()
+				wallParams.FilterType = Enum.RaycastFilterType.Exclude
+				wallParams.RespectCanCollide = true
+				local function canSee(cam, part, char)
+					local ignore = { char }
+					if player.Character then
+						ignore[2] = player.Character
+					end
+					wallParams.FilterDescendantsInstances = ignore
+					local origin = cam.CFrame.Position
+					return Workspace:Raycast(origin, part.Position - origin, wallParams) == nil
+				end
+
 				local function pickTarget(cam)
 					local center = cam.ViewportSize / 2
 					local best, bestDist
@@ -15219,7 +15993,7 @@ do
 								local pos, onScreen = cam:WorldToViewportPoint(part.Position)
 								if onScreen then
 									local d = (Vector2.new(pos.X, pos.Y) - center).Magnitude
-									if d <= S.Fov and (bestDist == nil or d < bestDist) then
+									if d <= S.Fov and (bestDist == nil or d < bestDist) and (not S.WallCheck or canSee(cam, part, char)) then
 										best, bestDist = part, d
 									end
 								end
@@ -15229,12 +16003,37 @@ do
 					return best
 				end
 
+				-- SHOW TARGET: a red-tinted highlight on the player the aimbot is locked onto (nil removes it)
+				local function updateMark(part)
+					local char = S.ShowTarget and part and part.Parent or nil
+					if aim.markChar == char and (char == nil or aim.mark) then
+						return
+					end
+					aim.markChar = char
+					if aim.mark then
+						aim.mark:Destroy()
+						aim.mark = nil
+					end
+					if char then
+						aim.mark = new("Highlight", {
+							Name = "ArcyAimTarget",
+							FillColor = Theme.sh.bright,
+							FillTransparency = 0.6,
+							OutlineColor = WHITE,
+							OutlineTransparency = 0,
+							Adornee = char,
+							Parent = char,
+						})
+					end
+				end
+
 				local function aimStep(dt)
 					local cam = Workspace.CurrentCamera
 					if not cam then
 						return
 					end
 					local part = pickTarget(cam)
+					updateMark(part)
 					if part then
 						local cf = cam.CFrame
 						local alpha = 1 - (1 - AIM_SMOOTH) ^ (math.max(dt, 1 / 240) * 60) -- same pull at any frame rate
@@ -15281,6 +16080,7 @@ do
 							aim.ringGui:Destroy()
 							aim.ringGui, aim.ring = nil, nil
 						end
+						updateMark(nil)
 					end
 				end
 
@@ -15294,6 +16094,8 @@ do
 						setAim(value == true)
 					elseif name == "Fov" and aim.ring then
 						aim.ring.Size = UDim2.fromOffset(S.Fov * 2, S.Fov * 2)
+					elseif name == "ShowTarget" and not value then
+						updateMark(nil)
 					end
 				end
 				function api.stop()
@@ -15322,6 +16124,32 @@ do
 			----------------------------------------------------------------
 			-- PAGE + ROW + CONTROLS
 			----------------------------------------------------------------
+			-- AUTO SIZE: every row is ROW_H of the page high and ROW_STEP apart, measured in STAGE HEIGHTS and written as pure SCALE (no pixels, no AbsoluteSize).
+			-- The list under the title line is a scrolling frame: its canvas is a multiple of the list's own height and every row is a fraction of that canvas,
+			-- so the rows are always the same share of the window as on the real Arceus window (rows 66 px of a 308 px page, 73 apart) - at the small / medium / full
+			-- screen size, in the detached window, on any phone, and while the window pops in (a UIScale around the window can no longer make them smaller).
+			-- The list scrolls when a page has more rows than fit (the real window shows the 4th row cut off the same way).
+			local LIST_TOP = LINE_Y + 0.012 -- the list starts just under the red line
+			local restPos, pageRows, pageCanvas = {}, {}, {} -- restPos[row] = where the row rests, pageRows[page] = its rows in order, pageCanvas[page] = canvas height in stage heights
+			local function layoutRows()
+				local listH = 1 - LIST_TOP -- the list's height, in stage heights
+				for pg, rows in pairs(pageRows) do
+					local top = ROW_Y - LIST_TOP -- where the first row starts inside the canvas
+					local canvas = math.max(top + #rows * ROW_STEP + 0.04, listH) -- the canvas is never shorter than the list, so scale = share of the real canvas
+					pageCanvas[pg] = canvas
+					for i, r in ipairs(rows) do
+						local rest = UDim2.new(ROW_X, 0, (top + (i - 1) * ROW_STEP) / canvas, 0)
+						restPos[r] = rest
+						r.Position = rest
+						r.Size = UDim2.new(ROW_W, 0, ROW_H / canvas, 0)
+					end
+					local list = pg:FindFirstChild("List")
+					if list then
+						list.CanvasSize = UDim2.new(0, 0, canvas / listH, 0) -- scale of the list's own height
+					end
+				end
+			end
+
 			local function newPage(name, title)
 				local pg = new("Frame", { Name = name, Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, Visible = false, Parent = stage })
 				label({
@@ -15330,7 +16158,7 @@ do
 					FontFace = FONT.Title,
 					TextXAlignment = Enum.TextXAlignment.Left,
 					Position = UDim2.fromScale(TITLE_X, TITLE_Y),
-					Size = UDim2.fromScale(0.5, 0.036),
+					Size = UDim2.fromScale(0.5, 0.052),
 					Parent = pg,
 				})
 				new("Frame", {
@@ -15342,27 +16170,44 @@ do
 					BorderSizePixel = 0,
 					Parent = pg,
 				})
+				-- the rows live in a list under the red line: it is cut at the bottom of the window and scrolls when a page has more rows than fit
+				-- (the real Arceus window shows the 4th row cut off the same way)
+				new("ScrollingFrame", {
+					Name = "List",
+					Position = UDim2.fromScale(0, LIST_TOP),
+					Size = UDim2.fromScale(1, 1 - LIST_TOP),
+					BackgroundTransparency = 1,
+					BorderSizePixel = 0,
+					ClipsDescendants = true,
+					CanvasSize = UDim2.new(),
+					ScrollBarThickness = 0,
+					ScrollingDirection = Enum.ScrollingDirection.Y,
+					Parent = pg,
+				})
+				pageRows[pg] = {}
 				return pg
 			end
 
 			local function newRow(pg, index, title, desc)
 				local r = new("Frame", {
 					Name = "Row_" .. index,
-					Position = UDim2.fromScale(ROW_X, ROW_Y + (index - 1) * ROW_STEP),
-					Size = UDim2.fromScale(ROW_W, ROW_H),
+					Position = UDim2.new(ROW_X, 0, 0, 0),
+					Size = UDim2.new(ROW_W, 0, 0, 40),
 					BackgroundColor3 = Color3.new(0, 0, 0),
 					BackgroundTransparency = 0.7, -- source: SettingToggle plate (#000, .7)
 					BorderSizePixel = 0,
-					Parent = pg,
+					Parent = pg:FindFirstChild("List"),
 				}, { corner(0.22) })
+				table.insert(pageRows[pg], r)
+				task.defer(layoutRows) -- sizes the rows once they all exist
 				label({
 					Name = "Title",
 					Text = title,
 					FontFace = FONT.Body,
 					TextXAlignment = Enum.TextXAlignment.Left,
 					TextYAlignment = Enum.TextYAlignment.Bottom,
-					Position = UDim2.fromScale(0.024, 0.08),
-					Size = UDim2.fromScale(0.6, 0.4),
+					Position = UDim2.fromScale(0.024, 0.16),
+					Size = UDim2.fromScale(0.6, 0.36),
 					Parent = r,
 				})
 				label({
@@ -15373,8 +16218,8 @@ do
 					TextYAlignment = Enum.TextYAlignment.Top,
 					TextTransparency = 0.5, -- source: description at .5
 					AnchorPoint = Vector2.new(0, 1),
-					Position = UDim2.fromScale(0.024, 0.86),
-					Size = UDim2.fromScale(0.7, 0.27),
+					Position = UDim2.fromScale(0.024, 0.85),
+					Size = UDim2.fromScale(0.7, 0.25),
 					Parent = r,
 				})
 				return r
@@ -15388,13 +16233,13 @@ do
 					Text = "",
 					AutoButtonColor = false,
 					AnchorPoint = Vector2.new(1, 0.5),
-					Position = UDim2.fromScale(0.975, 0.5),
-					Size = UDim2.fromScale(0.1, 0.58),
+					Position = UDim2.fromScale(0.979, 0.5),
+					Size = UDim2.fromScale(0.15, 0.606),
 					BackgroundColor3 = on and RED or SWITCH_OFF,
 					BackgroundTransparency = on and 0 or 0.1,
 					BorderSizePixel = 0,
 					Parent = r,
-				}, { corner(0.4), new("UIStroke", { Color = on and RIM_ON or RIM_OFF, Thickness = 2.5 }), ratio(1.45) })
+				}, { corner(0.5), rim(on and RIM_ON or BTN.SWRIM, BTN.SWRIMW), ratio(1.95) })
 				local knob = new("Frame", {
 					Name = "Knob",
 					AnchorPoint = CENTER,
@@ -15403,7 +16248,7 @@ do
 					BackgroundColor3 = WHITE,
 					BorderSizePixel = 0,
 					Parent = track,
-				}, { corner(0.4), ratio(1) })
+				}, { corner(0.5), ratio(1) })
 				pressFx(track)
 				-- the knob squeezes while the finger is down and springs back when it lets go
 				track.InputBegan:Connect(function(input)
@@ -15418,7 +16263,7 @@ do
 				end)
 				track.Activated:Connect(function()
 					on = not on
-					tween(knob, 0.3, { Position = UDim2.fromScale(on and KNOB_ON_X or KNOB_OFF_X, 0.5) }, Enum.EasingStyle.Back)
+					tween(knob, 0.18, { Position = UDim2.fromScale(on and KNOB_ON_X or KNOB_OFF_X, 0.5) }, Enum.EasingStyle.Back)
 					switchLook(track, on, true)
 					onChange(on)
 				end)
@@ -15476,14 +16321,15 @@ do
 					TextScaled = true,
 					ClearTextOnFocus = false,
 					AnchorPoint = CENTER,
-					Position = UDim2.fromScale(0.8383, 0.5),
-					Size = UDim2.fromScale(0.1807, BTN.H),
-					BackgroundColor3 = Color3.fromRGB(10, 10, 10),
+					Position = UDim2.fromScale(0.7769, 0.5),
+					Size = UDim2.fromScale(0.247, BTN.BOXH),
+					BackgroundColor3 = Color3.fromRGB(15, 15, 15),
 					BorderSizePixel = 0,
 					Parent = r,
 				}, {
-					corner(BTN.CORNER),
-					new("UIPadding", { PaddingTop = UDim.new(BTN.PAD, 0), PaddingBottom = UDim.new(BTN.PAD, 0) }),
+					corner(0.33),
+					rim(BTN.RIM, BTN.RIMW),
+					new("UIPadding", { PaddingTop = UDim.new(0.3, 0), PaddingBottom = UDim.new(0.3, 0) }),
 				})
 				local function set(v)
 					v = math.clamp(math.floor(v + 0.5), min, max)
@@ -15507,7 +16353,7 @@ do
 						AutoButtonColor = false,
 						AnchorPoint = Vector2.new(1, 0.5),
 						Position = UDim2.fromScale(x, 0.5),
-						Size = UDim2.fromScale(0.5, BTN.H), -- the aspect ratio makes it a square as tall as UP / DOWN
+						Size = UDim2.fromScale(0.5, BTN.SQ), -- the aspect ratio makes it a square
 						BackgroundColor3 = RED,
 						BorderSizePixel = 0,
 						Parent = r,
@@ -15517,7 +16363,7 @@ do
 						set(value + delta)
 					end)
 				end
-				square("-", 0.737, -step)
+				square("-", 0.6384, -step)
 				square("+", BTN.RIGHT, step)
 			end
 
@@ -15534,7 +16380,7 @@ do
 					BackgroundTransparency = 0.2,
 					BorderSizePixel = 0,
 					Parent = r,
-				}, { corner(0.35), new("UIStroke", { Color = RIM_OFF, Thickness = 2.5 }) })
+				}, { corner(0.35), rim(RIM_OFF, BTN.DDRIMW) })
 				local shown = label({
 					Name = "Selected",
 					Text = initial,
@@ -15565,7 +16411,7 @@ do
 					BorderSizePixel = 0,
 					ZIndex = 20,
 					Parent = btn,
-				}, { corner(0.2), new("UIStroke", { Color = EDGE, Thickness = 1.5 }), new("UIListLayout", { SortOrder = Enum.SortOrder.LayoutOrder }) })
+				}, { corner(0.2), rim(EDGE, 0.012, 1, 1.5), new("UIListLayout", { SortOrder = Enum.SortOrder.LayoutOrder }) })
 				pressFx(btn)
 				local items = {}
 				local listScale = new("UIScale", { Scale = 1, Parent = list })
@@ -15666,8 +16512,10 @@ do
 					local f = new("Frame", { AnchorPoint = CENTER, Position = UDim2.fromScale(x, y), Size = UDim2.fromScale(w, h), Rotation = rotation, BackgroundColor3 = WHITE, BorderSizePixel = 0, Parent = box }, { corner(1) })
 					new("Frame", { Name = "Vein", AnchorPoint = CENTER, Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.new(0.86, 0, 0, 1), BackgroundColor3 = TILE_RED, BorderSizePixel = 0, Parent = f })
 				end
-				feather(0.95, 0.36, -32, 0.55, 0.43)
-				feather(0.6, 0.26, -14, 0.34, 0.66)
+				-- like the real icon: a curved quill feather - the quill comes in from the upper left, the vane sweeps to the upper right
+				feather(0.8, 0.4, -30, 0.58, 0.47) -- main vane
+				feather(0.62, 0.28, -12, 0.45, 0.7) -- lower barbs
+				new("Frame", { Name = "Quill", AnchorPoint = CENTER, Position = UDim2.fromScale(0.2, 0.37), Size = UDim2.new(0.34, 0, 0, 2), Rotation = 38, BackgroundColor3 = WHITE, BorderSizePixel = 0, Parent = box }, { corner(1) })
 			end
 
 			local pages = {} -- name = { page, tile, rows }
@@ -15685,12 +16533,17 @@ do
 					line.Size = UDim2.new(0, 0, 0, 2)
 					tween(line, 0.6, { Size = UDim2.new(ROW_W, 0, 0, 2) }, Enum.EasingStyle.Quint)
 				end
+				local list = pageInfo.page:FindFirstChild("List")
+				if list then
+					list.CanvasPosition = Vector2.new(0, 0)
+				end
+				layoutRows()
 				for i, r in ipairs(pageInfo.rows) do
-					local rest = UDim2.fromScale(ROW_X, ROW_Y + (i - 1) * ROW_STEP)
-					r.Position = rest + UDim2.fromScale(0, 0.07)
+					local rest = restPos[r] or r.Position
+					r.Position = rest + UDim2.fromScale(0, 0.07 / (pageCanvas[pageInfo.page] or 1)) -- 0.07 of the stage height below its spot
 					task.delay((i - 1) * 0.06, function()
 						if r.Parent then
-							tween(r, 0.5, { Position = rest }, Enum.EasingStyle.Quint)
+							tween(r, 0.5, { Position = restPos[r] or rest }, Enum.EasingStyle.Quint)
 						end
 					end)
 				end
@@ -15749,20 +16602,28 @@ do
 			end
 
 			----------------------------------------------------------------
-			-- AIMBOT PAGE (placeholder rows in the same style - send the aimbot screenshot and it gets matched too)
+			-- AIMBOT PAGE (the screenshot: Aimbot / Wall Check / Team Check / Show Target; FOV is the extra last row the ring needs)
 			----------------------------------------------------------------
 			local aimPg = newPage("AimPage", "Universal aimbot")
 			local aimRows = {}
-			aimRows[1] = newRow(aimPg, 1, "Aimbot", "Locks onto the nearest player")
+			aimRows[1] = newRow(aimPg, 1, "Aimbot", "Universal aimbot")
 			addToggle(aimRows[1], false, function(v)
 				changed("Aimbot", v)
 			end)
-			aimRows[2] = newRow(aimPg, 2, "Team check", "Ignores your teammates")
+			aimRows[2] = newRow(aimPg, 2, "Wall Check", "Prevents from shooting at walls")
 			addToggle(aimRows[2], false, function(v)
+				changed("WallCheck", v)
+			end)
+			aimRows[3] = newRow(aimPg, 3, "Team Check", "Exclude team members")
+			addToggle(aimRows[3], false, function(v)
 				changed("TeamCheck", v)
 			end)
-			aimRows[3] = newRow(aimPg, 3, "FOV", "Size of the aim circle")
-			addStepper(aimRows[3], 120, 10, 500, 10, function(v)
+			aimRows[4] = newRow(aimPg, 4, "Show Target", "Highlights the player you are aiming at")
+			addToggle(aimRows[4], false, function(v)
+				changed("ShowTarget", v)
+			end)
+			aimRows[5] = newRow(aimPg, 5, "FOV", "Size of the aim circle")
+			addStepper(aimRows[5], 120, 10, 500, 10, function(v)
 				changed("Fov", v)
 			end)
 
@@ -16423,7 +17284,8 @@ do
 	-- the Editor page lives in its own function so its many locals do not count against the script's top-level limit
 	local function buildEditorPage()
 		local START_TAB = "Home" -- tab selected when the window first opens ("Home" or "Executor")
-		local EDIT_ICON = nil -- pencil on every file row. The source file has no id for it (see notes) - paste "rbxassetid://..." here
+		local EDIT_ICON = "rbxassetid://136198662112570" -- the rename pencil on every file row. Set nil to go back to the small drawn pencil
+		local EDIT_ICON_SIZE = 0.6 -- size of the pencil inside its button (was 0.75; 0.5 was the first, smallest size). Lower = smaller
 
 		local AI_ORB = 0.235 -- Arcy orb size (fraction of the editor height) - matches the reference (0.18 was too small)
 		local AI_GLOW = ORB_GLOW_SIZE -- glow size relative to the orb (LOOK SETTINGS)
@@ -16432,19 +17294,10 @@ do
 		local CENTER = Vector2.new(0.5, 0.5)
 		local STAR_YELLOW = Color3.fromRGB(253, 196, 27) -- #FDC41B (source)
 		local CONSOLE_GREEN = Color3.fromRGB(0, 255, 0) -- #0F0 (source)
-		local TILE_BG = Color3.fromRGB(30, 30, 33)
-		local TILE_EDGE = Color3.fromRGB(70, 70, 76)
-		local TRASH_BG = TILE_BG -- same grey as the + and star tiles in the reference
 		local ROW_SELECTED_TRANSPARENCY = 0.35 -- selected file row = PRIMARY red at this transparency
-		local TILE_GRAY = TILE_BG -- Plus / Favourite / Delete tiles ALL use this one grey, so their backgrounds always match
 		local AUTO_HOLD_TIME = 0.45 -- seconds you hold a file row to switch auto-execute on / off for that script
 		local AUTO_GREEN = Color3.fromRGB(30, 201, 151) -- bullet colour of an auto-executed file + the hold fill
 		local PAGE_SLIDE = 0.06 -- how far a page's panels slide in when you change tab (fraction of the page height)
-		local TILE_FLASH = { -- brief tint of a tile when it is used (it always fades back to TILE_GRAY)
-			blue = Color3.fromRGB(33, 66, 102),
-			yellow = Color3.fromRGB(94, 74, 14),
-			red = Color3.fromRGB(104, 28, 28),
-		}
 		local FX = { busy = false } -- small animation helpers, filled in below
 
 		local MONO = Font.new("rbxasset://fonts/families/Inconsolata.json", Enum.FontWeight.Regular, Enum.FontStyle.Normal)
@@ -16464,10 +17317,12 @@ do
 			Type = Color3.fromRGB(190, 160, 255), -- Luau types, @attributes
 		}
 
+		-- label = the word inside the pill (source: CategoryButton Title), title = the big heading of the panel (source: LongTitle, which the chosen
+		-- button writes into CategoryTitle): Files / Favourites / Auto-Execute
 		local CATEGORIES = {
-			{ key = "files", label = "Files", icon = A.FilesIcon, tint = Color3.fromRGB(78, 172, 252), pill = Color3.fromRGB(30, 62, 95), text = Color3.fromRGB(88, 178, 255) },
-			{ key = "star", label = "Favs", icon = A.StarIcon, tint = STAR_YELLOW, pill = Color3.fromRGB(91, 71, 10), text = STAR_YELLOW },
-			{ key = "run", label = "Auto", icon = A.RunIcon, tint = nil, pill = Color3.fromRGB(11, 72, 54), text = Color3.fromRGB(30, 201, 151) },
+			{ key = "files", label = "Files", title = "Files", icon = A.FilesIcon, tint = Color3.fromRGB(78, 172, 252), pill = Color3.fromRGB(30, 62, 95), text = Color3.fromRGB(88, 178, 255) },
+			{ key = "star", label = "Favs", title = "Favourites", icon = A.StarIcon, tint = STAR_YELLOW, pill = Color3.fromRGB(91, 71, 10), text = STAR_YELLOW },
+			{ key = "run", label = "Auto", title = "Auto-Execute", icon = A.RunIcon, tint = nil, pill = Color3.fromRGB(11, 72, 54), text = Color3.fromRGB(30, 201, 151) },
 		}
 
 		----------------------------------------------------------------
@@ -16480,6 +17335,145 @@ do
 		}
 		local nextNumber = 3
 		local selected = nil
+
+		local CREDIT_NAME = "Credit Owner"
+		local creditHidden = false
+		local Credit = {}
+		do
+			local BLOB = "048a6ef05c020b19c47f8639751402550cb43ab628531b28309747e73248113a3922a27deb36702817fc3b9c0e92f6a4959071c37eaca8acdaa51f8575d3b5edc0f105ba03ae2d68404fe732e51c9defa6e4e016c371acda91adff02c066a2cc91b5fa0cf85991f8a082bbab5a8b793c5c7f4850bc25a86652102f6a9b4af07d0b06326fc844c1048be6b58c8c0a8c4ed7b798b7a24cda71f69fd3ffe6049726aed9d5e8e91bf72b9643755c648432ca099ae0ba868c78f153d1a4f3868777ac0fdf8eee80ebbc0a922cbcf3b8cb2ddd78fc2640132b679e57f7761e4e7d219343fd6b481d003ed72e8f31a1e2839478c407a6294b0927249d5fed3b23"
+			local CHECK = 3150117317
+			local COUNT = 253
+			local KEY = "megacatcreators"
+			local function xor(a, b)
+				if bit32 and bit32.bxor then
+					return bit32.bxor(a, b)
+				end
+				local r, bitv = 0, 1
+				while a > 0 or b > 0 do
+					local x, y = a % 2, b % 2
+					if x ~= y then
+						r = r + bitv
+					end
+					a, b, bitv = math.floor(a / 2), math.floor(b / 2), bitv * 2
+				end
+				return r
+			end
+			local function keyAt(i)
+				return (string.byte(KEY, (i - 1) % #KEY + 1) + i * 31) % 256
+			end
+			local function hash(str)
+				local x = 5381
+				for i = 1, #str do
+					x = (x * 131 + string.byte(str, i)) % 4294967291
+				end
+				return x
+			end
+			function Credit.decode() -- the message, or nil when the encoded data was changed
+				local out, prev = {}, 0xA5
+				local n = math.floor(#BLOB / 2)
+				for i = 1, n do
+					local c = tonumber(string.sub(BLOB, i * 2 - 1, i * 2), 16)
+					if not c then
+						return nil
+					end
+					out[i] = string.char(xor(xor(c, keyAt(i)), prev))
+					prev = c
+				end
+				local text = table.concat(out)
+				if #text ~= COUNT or hash(CREDIT_NAME .. "\0" .. text) ~= CHECK then
+					return nil
+				end
+				return text
+			end
+			function Credit.make()
+				local text = Credit.decode()
+				if not text then
+					return nil
+				end
+				return { name = CREDIT_NAME, source = text, fav = false, autorun = false, locked = true }
+			end
+		end
+		local function creditStop() -- the credit data was changed: close the UI for good
+			warn("[Arcy] The Credit Owner data was changed. This copy is not the original made by megacatcreators, so it will not load.")
+			pcall(function()
+				gui:Destroy()
+			end)
+		end
+		local creditItem = Credit.make()
+		if not creditItem then
+			creditStop()
+			error("Credit Owner data was changed", 0)
+		end
+		-- THE REAL FILE in the executor's workspace. Returns true when it had to write it (missing or changed).
+		local CREDIT_FILE = "ArcyScripts/" .. CREDIT_NAME .. ".lua"
+		local creditFileWrittenOnce = false
+		local function creditFileEnsure()
+			local okAll, wrote = pcall(function()
+				if not writefile then
+					return false
+				end
+				local text = Credit.decode()
+				if not text then
+					return false
+				end
+				if not (isfile and readfile) then -- this executor cannot look at files: write it once at start-up
+					if creditFileWrittenOnce then
+						return false
+					end
+					creditFileWrittenOnce = true
+				elseif isfile(CREDIT_FILE) then
+					local function plain(str) -- same text even if line endings / the last blank line changed
+						return (string.gsub(string.gsub(tostring(str), "\r\n", "\n"), "%s+$", ""))
+					end
+					local okR, current = pcall(readfile, CREDIT_FILE)
+					if okR and plain(current) == plain(text) then
+						return false
+					end
+				end
+				if makefolder and isfolder and not isfolder("ArcyScripts") then
+					makefolder("ArcyScripts")
+				end
+				writefile(CREDIT_FILE, text)
+				return true
+			end)
+			return okAll and wrote == true
+		end
+		task.spawn(creditFileEnsure) -- on every start the real file is made (or made again)
+
+		-- keeps exactly one untouched Credit Owner file in the Editor, always the first one - unless you deleted it from the Editor, then it stays gone.
+		-- Returns true when it had to change something.
+		local function creditGuard()
+			local text = Credit.decode()
+			if not text then
+				error("Credit Owner data was changed", 0)
+			end
+			local changed = false
+			for i = #items, 1, -1 do
+				local it = items[i]
+				if it.locked then
+					if creditHidden or i > 1 then -- deleted from the Editor, or a second copy
+						table.remove(items, i)
+						changed = true
+					end
+				elseif type(it.name) == "string" and string.lower(it.name) == string.lower(CREDIT_NAME) then -- no other file may take the name
+					it.name = it.name .. " (copy)"
+					changed = true
+				end
+			end
+			if creditHidden then
+				return changed
+			end
+			local first = items[1]
+			if not (first and first.locked == true) then
+				table.insert(items, 1, Credit.make())
+				return true
+			end
+			if first.name ~= CREDIT_NAME or first.source ~= text or first.fav ~= false or first.autorun ~= false or first.path ~= nil then
+				first.name, first.source, first.fav, first.autorun, first.path = CREDIT_NAME, text, false, false, nil
+				changed = true
+			end
+			return changed
+		end
 
 		-- SAVED SCRIPTS: sources, favourites and auto-execute flags are kept in ArcyScripts/_state.json (writefile / readfile),
 		-- so Auto-Executed scripts are still there - and run - the next time the UI starts.
@@ -16495,11 +17489,12 @@ do
 					return HttpService:JSONDecode(raw)
 				end)
 				if okJ and type(data) == "table" and type(data.items) == "table" then
+					creditHidden = data.creditHidden == true -- deleted from the Editor before: it stays gone
 					local loaded = {}
 					for _, it in ipairs(data.items) do
 						if type(it) == "table" and type(it.name) == "string" then
 							loaded[#loaded + 1] = {
-								name = it.name,
+								name = (string.lower(it.name) == string.lower(CREDIT_NAME)) and (it.name .. " (copy)") or it.name,
 								source = type(it.source) == "string" and it.source or "",
 								fav = it.fav == true,
 								autorun = it.autorun == true,
@@ -16512,12 +17507,17 @@ do
 					end
 				end
 			end
+			if not creditHidden then
+				table.insert(items, 1, creditItem) -- Credit Owner is the first file on every start (until you delete it in the Editor)
+			end
 			local function snapshot()
 				local list = {}
 				for _, it in ipairs(items) do
-					list[#list + 1] = { name = it.name, source = it.source or "", fav = it.fav == true, autorun = it.autorun == true }
+					if not it.locked then -- Credit Owner is not saved: it is made again from the encoded data on every start
+						list[#list + 1] = { name = it.name, source = it.source or "", fav = it.fav == true, autorun = it.autorun == true }
+					end
 				end
-				return HttpService:JSONEncode({ items = list, nextNumber = nextNumber })
+				return HttpService:JSONEncode({ items = list, nextNumber = nextNumber, creditHidden = creditHidden })
 			end
 			task.spawn(function()
 				local okS, last = pcall(snapshot)
@@ -16565,8 +17565,9 @@ do
 
 		-- declared up front because the tiles, rows and buttons call each other (they are filled in below)
 		local refreshList, selectItem, highlightRows, neighbourOf, removeRow, toggleAuto
+		local lastPick = {} -- the script you had open last in each tab (files / star / run), brought back by auto select when you reopen that tab
 		local addScript, favouriteSelected, deleteSelected
-		local plusIcon, plusFx, starImage, starFx, trashIcon, trashFx
+		local starImage -- the star tile's picture (outline / filled), see refreshStar
 		local rowOf = {} -- [item] = { slot = ..., row = ... } for the rows that are on screen
 
 		----------------------------------------------------------------
@@ -17271,6 +18272,15 @@ do
 				return
 			end
 			local text = codeBox.Text
+			if selected and selected.locked then -- locked file: put its text straight back
+				if text ~= selected.source then
+					loading = true
+					codeBox.Text = selected.source
+					loading = false
+					refreshView()
+				end
+				return
+			end
 			if selected then
 				selected.source = text
 			end
@@ -17292,6 +18302,10 @@ do
 		end)
 
 		local function setCode(text)
+			if selected and selected.locked then
+				showToast({ style = "error", title = "Locked", text = selected.name .. " is locked" })
+				return
+			end
 			loading = true
 			codeBox.Text = text
 			loading = false
@@ -17305,12 +18319,15 @@ do
 		-- EDITOR BUTTONS (tile + icon, ids from the source)
 		----------------------------------------------------------------
 		local function tileButton(p)
-			local btn = new("ImageButton", {
+			-- p.roundIcon = the source's layout (used by the Execute button): the tile is only a PICTURE (an ImageLabel, so its big see-through
+			-- padding never blocks a tap on Paste / the code box) and the 1:1 round icon inside it is the real button, like EditorExecuteButton.
+			local src = p.roundIcon == true
+			local tileProps = {
 				Name = p.name,
 				Image = p.tile,
 				ImageColor3 = p.tileTint or WHITE,
+				ImageTransparency = p.tileFade or 0, -- 1 = hide the tile image (only the solid tile colour stays)
 				ScaleType = Enum.ScaleType.Fit,
-				AutoButtonColor = false,
 				BackgroundColor3 = p.bg or WHITE,
 				BackgroundTransparency = p.bg and 0 or 1, -- p.bg = visible tile color behind the tile image (the shadow image alone is nearly invisible)
 				BorderSizePixel = 0,
@@ -17319,8 +18336,12 @@ do
 				Size = UDim2.fromScale(1, p.h), -- the aspect constraint makes it a fitted shape of height p.h
 				ZIndex = 5,
 				Parent = editor,
-			}, { ratio(p.aspect or 1), p.bg and corner(p.bgCorner or 0.5) or nil })
-			new("ImageLabel", {
+			}
+			if not src then
+				tileProps.AutoButtonColor = false
+			end
+			local btn = new(src and "ImageLabel" or "ImageButton", tileProps, { ratio(p.aspect or 1), p.bg and corner(p.bgCorner or 0.5) or nil })
+			local iconProps = {
 				Name = "Icon",
 				Image = p.icon,
 				ScaleType = Enum.ScaleType.Fit,
@@ -17330,9 +18351,25 @@ do
 				Size = UDim2.fromScale(p.iconSize, p.iconSize),
 				ZIndex = 6,
 				Parent = btn,
-			})
-			pressFx(btn) -- small press-in animation
-			btn.Activated:Connect(p.onClick)
+			}
+			if src then
+				iconProps.AutoButtonColor = false
+			end
+			local icon = new(src and "ImageButton" or "ImageLabel", iconProps, src and { ratio(1), corner(0.5) } or nil) -- source: icon button 1:1 with UICorner .5
+			local hit = src and icon or btn
+			if p.cascade then
+				-- source: utils:AnimateCascade(<tile>, { AnimateSelf = true, SkipTransparency = true }) - no press-in: the tile and its icon drop a little and
+				-- spring back (FX.animateSelf, defined with the page cascade below), then the button does its job
+				hit.Activated:Connect(function()
+					if FX.animateSelf then
+						FX.animateSelf(btn)
+					end
+					p.onClick()
+				end)
+			else
+				pressFx(hit) -- small press-in animation
+				hit.Activated:Connect(p.onClick)
+			end
 			return btn
 		end
 
@@ -17347,6 +18384,10 @@ do
 				local name = item and item.name
 				local path = item and item.path
 				local text = codeBox.Text
+				if item and item.locked then -- never written to disk, so it cannot show in the LocalScripts view
+					showToast({ style = "error", title = "Save", text = item.name .. " is locked" })
+					return
+				end
 				showToast({
 					style = "confirm",
 					title = "Save",
@@ -17369,6 +18410,7 @@ do
 			name = "ConsoleButton", tile = A.SaveTile, tileTint = CONSOLE_GREEN, icon = A.ConsoleIcon,
 			x = 0.919, y = 0.25, h = 0.111, aspect = 1, iconSize = 0.68,
 			bg = Color3.fromRGB(4, 48, 8), bgCorner = 0.5,
+			cascade = true, -- source: AnimateCascade(EditorConsoleButtonShadow, { AnimateSelf = true, SkipTransparency = true })
 			onClick = function()
 				callHook("OnConsole")
 			end,
@@ -17428,9 +18470,10 @@ do
 
 		-- play (the source's EditorExecuteButton) - this script only calls Hooks.OnRun, it runs nothing itself
 		tileButton({
+			-- EXACTLY the source's EditorExecuteButtonShadow + EditorExecuteButton: the shadow picture itself is the tile (no solid dark square behind it,
+			-- BackgroundTransparency = 1), centred at (.9, .87), size .35 with aspect 1.117, and the play icon inside is .3 of it (round, UICorner .5)
 			name = "RunButton", tile = A.RunTile, icon = A.RunIcon,
-			x = 0.896, y = 0.871, h = 0.14, aspect = 1.117, iconSize = 0.78,
-			bg = Color3.fromRGB(27, 30, 29), bgCorner = 0.22,
+			x = 0.9, y = 0.87, h = 0.35, aspect = 1.117, iconSize = 0.3, roundIcon = true,
 			onClick = function()
 				local text = codeBox.Text
 				local name = selected and selected.name
@@ -17503,100 +18546,148 @@ do
 			ZIndex = 7,
 			Parent = editor,
 		}, { ratio(1) })
-		-- The original prompt stays unchanged. Its answer can be inserted at the
-		-- Editor cursor through the existing confirmation toast.
-		local arcyBusy = false
-		local arcyInsertAt = 1
-		local function waitForPromptToClose()
-			local started = os.clock()
-			while alive and main:GetAttribute("ArcyInstantOpen") and os.clock() - started < 3 do
-				task.wait(0.05)
-			end
-		end
+		-- ARCY IN THE EDITOR - the source's EditorAIButton flow:
+		--   1) tap the orb: the "Instant code with Arcy" prompt opens
+		--   2) send: the prompt closes and a NEW Editor file "AI Script" opens with "-- Arcy is reasoning..." in it   (source: editor:AddTab("AI Script", "-- Arcy is reasoning..."))
+		--   3) the answer arrives and replaces that text   (source: tab:SetSource(src)):
+		--        --[[ the words of the answer ]]                      (only when there are words; the window lights up too, source: BackgroundGlow)
+		--        -- Generated by Arcy, Arceus Intelligence.
+		--        the code                                             (no code: "-- Arcy didn't generate any code...")
+		-- Nothing is inserted into the file you were editing and nothing runs by itself: Play still asks first.
+		-- "Cmds" and "open <tab>" are answered at once (no AI request), so they do not open an AI Script file.
+		do
+			local arcyBusy = false -- source: utils.axintDebounce (one question at a time)
 
-		local function insertArcyResponse(answer, at)
-			answer = tostring(answer or ""):gsub("\r\n?", "\n")
-			local current = codeBox.Text
-			at = math.clamp(tonumber(at) or (#current + 1), 1, #current + 1)
-			setCode(current:sub(1, at - 1) .. answer .. current:sub(at))
-			pcall(function()
-				codeBox.CursorPosition = at + #answer
-			end)
-		end
-		homeRefs.insertArcyResponse = insertArcyResponse
-
-		local previousOnAI = Hooks.OnAI
-		Hooks.OnAI = function(prompt)
-			if previousOnAI then
-				pcall(previousOnAI, prompt)
-			end
-			if not string.find(tostring(prompt or ""), "%S") then
-				return
-			end
-			task.spawn(function()
-				if arcyBusy then
-					if homeRefs.finishInstantReasoning then
-						homeRefs.finishInstantReasoning()
+			-- the text of the AI Script file when the answer is ready (the source's src)
+			local function arcyScriptSource(result, err)
+				if not result then
+					-- the source leaves the tab empty here; the reason (for example the usage limit) is more useful
+					return "-- " .. (string.gsub(tostring(err or "Arceus Intelligence is not available, please try again later"), "%s+", " "))
+				end
+				local src = ""
+				local words = ArcyAI.ExtractProse(result.text)
+				if string.find(words, "%S") then
+					-- the source writes --[[ ... ]]; a longer bracket is used only when the words themselves contain a ]]
+					local level = 0
+					while string.find(words, "]" .. string.rep("=", level) .. "]", 1, true) do
+						level = level + 1
 					end
-					waitForPromptToClose()
+					local eq = string.rep("=", level)
+					src = src .. "--[" .. eq .. "[\n\t\t" .. words .. "\n]" .. eq .. "]\n\n"
+				end
+				if type(result.code) == "string" and string.find(result.code, "%S") then
+					src = src .. "-- Generated by Arcy, Arceus Intelligence.\n" .. result.code
+				else
+					src = src .. "-- Arcy didn't generate any code..."
+				end
+				return src
+			end
+
+			local function askArcyInEditor(prompt)
+				prompt = string.match(tostring(prompt or ""), "^%s*(.-)%s*$") or ""
+				if prompt == "" then
+					return
+				end
+
+				-- "Cmds" / "open settings": answered here at once, there is nothing to reason about
+				if ArcyAI.ParseCommand(prompt) or ArcyAI.LocalIntent(prompt) then
+					local okQuick, quick = pcall(ArcyAI.Ask, prompt, "Editor", "")
+					if okQuick and type(quick) == "table" then
+						if quick.noInsert then
+							showToast({ style = "info", title = "Arcy", text = string.sub(tostring(quick.text or ""), 1, 900) })
+						elseif type(quick.actions) == "table" and homeRefs.runArcyActions then
+							pcall(homeRefs.runArcyActions, quick)
+						end
+					end
+					return
+				end
+
+				if arcyBusy then
 					showToast({ style = "info", title = "Arcy", text = "Arcy is still answering your previous question." })
 					return
 				end
 				arcyBusy = true
-				local result, err = ArcyAI.Ask(prompt, "Editor", codeBox.Text)
-				arcyBusy = false
-				if not alive then
-					return
-				end
-				if homeRefs.finishInstantReasoning then -- the prompt's text box was showing "Reasoning..." - the answer is here, close it
-					homeRefs.finishInstantReasoning()
-				end
-				waitForPromptToClose()
-				if not result then
-					showToast({ style = "error", title = "Arcy", text = tostring(err or "Both AI providers failed. Please try again.") })
-					return
+
+				-- the script you were editing goes to Arcy as context, so read it BEFORE the AI Script file opens
+				local context = codeBox.Text
+				local reasoningText = "-- Arcy is reasoning..."
+				local okOpen, item = pcall(homeRefs.openInEditor, "AI Script", reasoningText)
+				if not okOpen or type(item) ~= "table" then
+					item = nil
 				end
 
-				if type(result.actions) == "table" and #result.actions > 0 and homeRefs.runArcyActions then
-					local okRun, consumed = pcall(homeRefs.runArcyActions, result)
-					if okRun and (consumed or not result.code) then
-						return -- a tab was opened or the code went into a new Editor file
+				task.spawn(function()
+					local okAsk, result, err = pcall(ArcyAI.Ask, prompt, "Editor", context)
+					if not okAsk then
+						result, err = nil, result
 					end
-				end
+					arcyBusy = false
+					if not alive then
+						return
+					end
 
-				if result.noInsert then -- a command answer (Cmds): show it, nothing goes into the script
-					showToast({ style = "info", title = "Arcy", text = string.sub(tostring(result.text or ""), 1, 900) })
+					local src = arcyScriptSource(result, err)
+					if result and string.find(ArcyAI.ExtractProse(result.text), "%S") then
+						pcall(glowWindow) -- source: BackgroundGlow lights up (#707070) and fades back to black after 3 s
+					end
+
+					if item then
+						item.source = src
+						if selected == item then -- still the open file: show the answer in the editor now
+							setCode(src)
+						end
+					else
+						-- the AI Script file could not be opened: show the answer instead of losing it
+						showToast({ style = "info", title = "Arcy", text = string.sub(src, 1, 900) })
+					end
+
+					-- an <<OPEN:Tab>> tag of the answer still opens that tab (the code already sits in the AI Script file, so an EDITOR tag is not needed)
+					if result and type(result.actions) == "table" and homeRefs.runArcyActions then
+						local openOnly = {}
+						for _, act in ipairs(result.actions) do
+							if act.type == "open" then
+								openOnly[#openOnly + 1] = act
+							end
+						end
+						if #openOnly > 0 then
+							task.delay(0.7, function() -- a moment to see the answer first
+								if alive then
+									pcall(homeRefs.runArcyActions, { actions = openOnly })
+								end
+							end)
+						end
+					end
+				end)
+			end
+
+			local previousOnAI = Hooks.OnAI
+			Hooks.OnAI = function(prompt)
+				if previousOnAI then
+					pcall(previousOnAI, prompt)
+				end
+				if not string.find(tostring(prompt or ""), "%S") then
 					return
 				end
+				task.spawn(askArcyInEditor, prompt)
+			end
 
-				local insertion = result.code or result.text
-				local preview = tostring(result.text)
-				if #preview > 900 then
-					preview = string.sub(preview, 1, 900) .. "..."
+			orb.Activated:Connect(function()
+				if arcyBusy then -- source: if utils.axintDebounce then return end
+					showToast({ style = "info", title = "Arcy", text = "Arcy is still answering your previous question." })
+					return
 				end
-				showToast({
-					style = "confirm",
-					title = "Arcy",
-					text = preview .. "\n\n" .. UiLang.tr("Confirm to insert this response into the Editor."),
-					onConfirm = function()
-						insertArcyResponse(insertion, arcyInsertAt)
-						pcall(glowWindow)
-					end,
-				})
+				if openInstantCode then
+					-- onSubmit: the prompt closes, the window comes back, THEN the answer flow starts (no extra window glow at send, like the source)
+					openInstantCode({
+						onSubmit = function(prompt)
+							callHook("OnAI", prompt)
+						end,
+					})
+				else
+					callHook("OnAI", "")
+				end
 			end)
 		end
-
-		orb.Activated:Connect(function()
-			arcyInsertAt = codeBox.CursorPosition
-			if arcyInsertAt < 1 then
-				arcyInsertAt = #codeBox.Text + 1
-			end
-			if openInstantCode then
-				openInstantCode({ reasoning = "Reasoning" }) -- the text box shows "Reasoning..." while Arcy answers
-			else
-				callHook("OnAI", "")
-			end
-		end)
 
 		----------------------------------------------------------------
 		-- FILES PANEL
@@ -17616,11 +18707,14 @@ do
 			Name = "SearchBox",
 			Position = UDim2.fromScale(0.075, 0.127),
 			Size = UDim2.fromScale(0.85, 0.08),
-			BackgroundColor3 = Color3.fromRGB(98, 98, 102),
+			-- source TabsSearchBox: BackgroundColor3 white + BackgroundTransparency .8 (a dark glass pill, NOT the solid light grey it was),
+			-- placeholder = Roblox's default grey (178, 178, 178), text = the primary text colour
+			BackgroundColor3 = Color3.fromRGB(255, 255, 255),
+			BackgroundTransparency = 0.8,
 			BorderSizePixel = 0,
 			Text = "",
-		PlaceholderText = "Search scripts...",
-			PlaceholderColor3 = Color3.fromRGB(215, 215, 215),
+			PlaceholderText = "Search scripts...",
+			PlaceholderColor3 = Color3.fromRGB(178, 178, 178),
 			TextColor3 = TEXT,
 			FontFace = FONT.Body,
 			TextScaled = true,
@@ -17691,18 +18785,20 @@ do
 			search.Text = ""
 		end)
 
-		-- Plus / Favourite / Delete tiles. The slot keeps the layout exactly as before (same spot, same square shape); the tile
-		-- inside it is what animates. All three tiles get the same grey (bg) and the same edge.
-		local function topTile(name, x, bg, icon, iconTint, glowColor, onClick)
+		-- Plus / Favourite / Delete tiles. Source (EditorSideBar): NewFileButton, FavouriteButton and DeleteFileButton are plain white tiles
+		-- (BackgroundTransparency .9, corner .25, icon .6 of the tile) at x .075 (left edge), .5 (centre) and .925 (right edge). There is no glow,
+		-- no flash and no press-in: a tap runs utils:AnimateCascade(tile, { AnimateSelf = true, SkipTransparency = true }) - the tile and its icon
+		-- drop a little and spring back (see FX.animateSelf, defined with the page cascade below) - and then does its job.
+		local function topTile(name, x, anchorX, icon, iconTint, onClick)
 			local slot = new("Frame", {
 				Name = name .. "Slot",
+				AnchorPoint = Vector2.new(anchorX, 0),
 				Position = UDim2.fromScale(x, 0.233),
 				Size = UDim2.fromScale(0.226, 0.122),
 				BackgroundTransparency = 1,
 				ZIndex = 3,
 				Parent = files,
 			}, { ratio(1) })
-			local glow = FX.glow(slot, "Glow", 1.7, 1)
 			local btn = new("TextButton", {
 				Name = name,
 				Text = "",
@@ -17710,14 +18806,12 @@ do
 				AnchorPoint = CENTER,
 				Position = UDim2.fromScale(0.5, 0.5),
 				Size = UDim2.fromScale(1, 1),
-				BackgroundColor3 = bg,
+				BackgroundColor3 = WHITE,
+				BackgroundTransparency = 0.9,
 				BorderSizePixel = 0,
 				ZIndex = 3,
 				Parent = slot,
-			}, {
-				corner(0.22),
-				new("UIStroke", { Color = TILE_EDGE, Thickness = 1, Transparency = 0.4 }),
-			})
+			}, { corner(0.25) })
 			local img = new("ImageLabel", {
 				Name = "Icon",
 				Image = icon,
@@ -17726,31 +18820,25 @@ do
 				BackgroundTransparency = 1,
 				AnchorPoint = CENTER,
 				Position = UDim2.fromScale(0.5, 0.5),
-				Size = UDim2.fromScale(0.66, 0.66),
+				Size = UDim2.fromScale(0.6, 0.6),
 				ZIndex = 4,
 				Parent = btn,
-			}, { new("UIScale", { Name = "Pop" }) })
-			pressFx(btn) -- press-in animation
-			btn.Activated:Connect(onClick)
-
-			local fx = { button = btn, glow = glow }
-			-- tint the tile for a moment (it fades back to the shared grey) and flash the glow behind it
-			function fx.flash(tint, peak)
-				btn.BackgroundColor3 = tint
-				FX.play(btn, 0.5, { BackgroundColor3 = bg }, Enum.EasingStyle.Quad)
-				FX.burst(glow, glowColor, (peak or 1) * 0.6) -- kept small and soft
-			end
-			return img, fx
+			})
+			btn.Activated:Connect(function()
+				FX.animateSelf(btn)
+				onClick()
+			end)
+			return img, { button = btn }
 		end
 
 		-- + (new file), star (favourite the selected file), trash (delete the selected file) - what each one does is in ROWS + BEHAVIOUR below
-		plusIcon, plusFx = topTile("NewFileButton", 0.075, TILE_GRAY, A.NewIcon, nil, Color3.fromRGB(78, 172, 252), function()
+		topTile("NewFileButton", 0.075, 0, A.NewIcon, nil, function()
 			addScript()
 		end)
-		starImage, starFx = topTile("FavouriteButton", 0.381, TILE_GRAY, A.StarIcon, STAR_YELLOW, STAR_YELLOW, function()
+		starImage = topTile("FavouriteButton", 0.5, 0.5, A.StarIcon, STAR_YELLOW, function()
 			favouriteSelected()
 		end)
-		trashIcon, trashFx = topTile("DeleteFileButton", 0.703, TILE_GRAY, A.TrashIcon, nil, Color3.fromRGB(255, 64, 64), function()
+		topTile("DeleteFileButton", 0.925, 1, A.TrashIcon, nil, function()
 			deleteSelected()
 		end)
 
@@ -17784,7 +18872,7 @@ do
 					BackgroundTransparency = 1,
 					AnchorPoint = CENTER,
 					Position = UDim2.fromScale(0.5, 0.5),
-					Size = UDim2.fromScale(0.5, 0.5),
+					Size = UDim2.fromScale(EDIT_ICON_SIZE, EDIT_ICON_SIZE),
 					ZIndex = 4,
 					Parent = parent,
 				})
@@ -17869,12 +18957,20 @@ do
 			if not openInstantCode then
 				return
 			end
+			if item.locked then
+				showToast({ style = "error", title = "Locked", text = item.name .. " can't be renamed" })
+				return
+			end
 			openInstantCode({
 				title = "Renamed to New One", -- the big coloured title
 				placeholder = "Renamed...", -- the grey hint inside the pill
 				onSubmit = function(newName)
 					local oldName = item.name
 					if newName == oldName then
+						return
+					end
+					if string.lower(tostring(newName)) == string.lower(CREDIT_NAME) then -- the name is reserved, nobody can fake the file
+						showToast({ style = "error", title = "Rename", text = "That name is reserved" })
 						return
 					end
 					item.name = newName
@@ -17897,7 +18993,9 @@ do
 			local out = {}
 			for _, item in ipairs(items) do
 				local inCategory
-				if category == "files" then
+				if item.locked then
+					inCategory = category == "files" -- Credit Owner: Files tab only (never Favs / Auto)
+				elseif category == "files" then
 					inCategory = not item.autorun -- File Scripts: auto-executed scripts live in the Auto-Executed tab
 				elseif category == "star" then
 					inCategory = item.fav == true -- Favorites: every favourited script
@@ -17933,8 +19031,14 @@ do
 		selectItem = function(item, rebuild)
 			local changed = item ~= selected
 			selected = item
+			if item then -- remember it for the tab it is listed in
+				if (category == "files" and not item.autorun) or (category == "star" and item.fav == true) or (category == "run" and item.autorun == true) then
+					lastPick[category] = item
+				end
+			end
 			loading = true
 			codeBox.Text = item and item.source or ""
+			codeBox.TextEditable = not (item and item.locked) -- a locked file can be read and copied, not typed in
 			loading = false
 			refreshView()
 			refreshStar()
@@ -18120,6 +19224,10 @@ do
 
 		-- hold a row: it moves between File Scripts and Auto-Executed (Favorites shows both kinds)
 		toggleAuto = function(item)
+			if item.locked then
+				showToast({ style = "error", title = "Locked", text = item.name .. " is locked" })
+				return
+			end
 			local neighbour = (category ~= "star") and neighbourOf(item) or nil
 			item.autorun = not item.autorun
 			callHook("OnAutoExecute", item.name, item.source, item.autorun)
@@ -18146,11 +19254,6 @@ do
 				autorun = category == "run",
 			}
 			table.insert(items, item)
-			plusFx.flash(TILE_FLASH.blue, 1)
-			plusIcon.Rotation = 0
-			FX.play(plusIcon, 0.45, { Rotation = 90 }, Enum.EasingStyle.Back).Completed:Once(function()
-				plusIcon.Rotation = 0 -- a plus looks the same turned 90 degrees, so this reset is invisible
-			end)
 			if search.Text ~= "" then
 				search.Text = ""
 			end
@@ -18167,23 +19270,15 @@ do
 		favouriteSelected = function()
 			local item = selected
 			if not item then
-				FX.shake(starFx.button, UDim2.fromScale(0.5, 0.5), 5)
+				return -- source: no selected tab, nothing happens
+			end
+			if item.locked then
+				showToast({ style = "error", title = "Locked", text = item.name .. " is locked" })
 				return
 			end
 			local neighbour = (category == "star" and item.fav) and neighbourOf(item) or nil -- picked while the row is still listed
 			item.fav = not item.fav
-			refreshStar()
-			local pop = starImage.Pop
-			if item.fav then
-				starFx.flash(TILE_FLASH.yellow, 1)
-				pop.Scale = 0.45
-				starImage.Rotation = -72
-				FX.play(pop, 0.55, { Scale = 1 }, Enum.EasingStyle.Back)
-				FX.play(starImage, 0.55, { Rotation = 0 }, Enum.EasingStyle.Back)
-			else
-				pop.Scale = 1.3
-				FX.play(pop, 0.4, { Scale = 1 }, Enum.EasingStyle.Back)
-			end
+			refreshStar() -- source: the star picture changes between the outline and the filled star
 			callHook("OnFavorite", item.name, item.fav)
 			if category == "star" then
 				if item.fav then
@@ -18200,22 +19295,13 @@ do
 			end
 		end
 
-		-- trash : delete the selected script. Favorites are undeletable - unfavourite first.
+		-- trash : delete the selected script (source: DeleteFileButton asks first, then deletes the selected tab - favourites too).
 		deleteSelected = function()
 			if FX.busy then
 				return
 			end
 			local item = selected
 			if not item then
-				FX.shake(trashFx.button, UDim2.fromScale(0.5, 0.5), 5)
-				return
-			end
-			if item.fav then
-				trashFx.flash(TILE_FLASH.red, 0.7)
-				FX.shake(trashFx.button, UDim2.fromScale(0.5, 0.5), 6)
-				starFx.flash(TILE_FLASH.yellow, 0.9) -- points at the star
-				starImage.Pop.Scale = 1.4
-				FX.play(starImage.Pop, 0.5, { Scale = 1 }, Enum.EasingStyle.Back)
 				return
 			end
 			-- PERMISSION FIRST (same Confirm toast as the Clear button): Confirm deletes the file, tapping anywhere else closes the toast and keeps it
@@ -18231,18 +19317,27 @@ do
 					task.delay(1.2, function() -- safety: never leave the button locked
 						FX.busy = false
 					end)
-					trashFx.flash(TILE_FLASH.red, 1)
-					FX.wiggle(trashIcon)
 					local at = table.find(items, item) or #items
 					local neighbour = neighbourOf(item)
 					removeRow(item, function()
 						local index = table.find(items, item)
+						if item.locked then
+							creditHidden = true -- Credit Owner deleted in the Editor: it never shows here again (the real file is not touched)
+						end
 						if index then
 							table.remove(items, index)
 						end
-						if #items == 0 then
+						local hasReal = false -- Credit Owner always stays, so look for a real file
+						for _, it in ipairs(items) do
+							if not it.locked then
+								hasReal = true
+								break
+							end
+						end
+						if not hasReal then
 							nextNumber = nextNumber + 1
-							table.insert(items, { name = "Script n." .. nextNumber, source = "", fav = false, autorun = false })
+							neighbour = { name = "Script n." .. nextNumber, source = "", fav = false, autorun = false }
+							table.insert(items, neighbour)
 						end
 						selectItem(neighbour or items[math.min(at, #items)], true)
 						FX.busy = false
@@ -18317,13 +19412,30 @@ do
 						if category ~= cat.key then
 							category = cat.key
 							renderCategories(true)
-							refreshList("cascade")
+							-- auto select: opening Files / Favs / Auto always opens a script of that tab in the editor: the one you had open
+							-- last in this tab (if it is still there), otherwise the first script of the tab
+							local shown = visibleItems()
+							local pick = lastPick[cat.key]
+							if not (pick and table.find(shown, pick)) then
+								pick = shown[1]
+							end
+							if pick then
+								selectItem(pick, "cascade")
+							else
+								refreshList("cascade")
+							end
 						end
 						callHook("OnCategory", cat.key)
 					end)
 				end
 
 				local on = cat.key == category
+				if on then
+					local heading = files:FindFirstChild("Title") -- source: the chosen category button sets CategoryTitle.Text to its LongTitle
+					if heading then
+						heading.Text = cat.title
+					end
+				end
 				local goalSize = UDim2.fromScale(on and 0.53 or 0.17, 1)
 				local goalIconPos = on and UDim2.fromScale(0.2, 0.5) or UDim2.fromScale(0.5, 0.5)
 				local goalIconSize = on and UDim2.fromScale(0.25, 0.75) or UDim2.fromScale(0.75, 0.75) -- same icon size selected or not
@@ -18380,7 +19492,11 @@ do
 			codeView.Position = UDim2.fromOffset(e.X * 0.04 + gutter, e.Y * 0.035)
 			codeBox.Position = codeView.Position
 			codeView.Size = UDim2.fromOffset(e.X * 0.78, e.Y * 0.45)
-			codeBox.Size = codeView.Size
+			-- source (CodeEditor): the text box always fills the WHOLE visible code area (UISizeConstraint MinSize = the visible size, it only grows with the text),
+			-- so a tap anywhere in the editor - not only on the text - focuses it and opens the keyboard. It used to be only 78% x 45% of the panel, so a tap
+			-- below or beside a short script hit nothing and the editor looked uneditable. (-1 px: the canvas never ends up a hair bigger than the panel and scrolls)
+			local boxX, boxY = codeView.Position.X.Offset, codeView.Position.Y.Offset
+			codeBox.Size = UDim2.fromOffset(math.max(60, e.X - boxX - 1), math.max(40, e.Y - boxY - 1))
 			rowH = math.floor(f.Y * 0.083 + 0.5)
 			listLayout.Padding = UDim.new(0, math.floor(f.Y * 0.0185 + 0.5))
 			for _, slot in ipairs(list:GetChildren()) do
@@ -18471,6 +19587,165 @@ do
 			end
 		end
 
+		----------------------------------------------------------------
+		-- PAGE CASCADE  -  source: utils:AnimateCascade, called by showPage on the page that opens (and on the side button that was tapped).
+		--   1) every visible piece of the page (except the ExcludeNames) is made fully transparent and moved DOWN by .15 of its parent (0.15 s, Linear)
+		--   2) then piece number i waits (i - 1) * 0.0075 s and springs back to its spot with a 0.6 s Back / Out tween, fading back in
+		-- The side button runs it with SkipTransparency (only the spring, no fade). ExcludeNames are the same as the source's showPage:
+		-- BarFilter, GridFilter, CloudBestScriptsBar, AIPlayerBackgroundOverlay and the Files / Favs / Auto buttons (they animate themselves).
+		----------------------------------------------------------------
+		local Cascade = {}
+		do
+			local cascadeTS = game:GetService("TweenService")
+			local keepRest = setmetatable({}, { __mode = "k" }) -- [gui] = where it belongs (kept while a cascade still runs on it)
+			local owner = setmetatable({}, { __mode = "k" }) -- [gui] = the newest cascade that moves it (an older one stops touching it)
+			local SKIP_NAMES = {
+				BarFilter = true,
+				GridFilter = true,
+				CloudBestScriptsBar = true,
+				AIPlayerBackgroundOverlay = true,
+				Indicator = true,
+			}
+			local SKIP_PREFIX = { "Cat_" } -- source: CategoryBtn_Files / _Auto / _Favs
+			local FAST_OUT = TweenInfo.new(0.15, Enum.EasingStyle.Linear, Enum.EasingDirection.Out)
+			local SPRING = TweenInfo.new(0.6, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
+			local DELAY_BETWEEN = 0.0075
+			local MAX_STAGGER = 120 -- pieces after the 120th share the same delay, so a page with hundreds of pieces never takes seconds
+
+			local function skipped(obj)
+				if SKIP_NAMES[obj.Name] or obj:GetAttribute("NoCascade") then
+					return true
+				end
+				for _, prefix in ipairs(SKIP_PREFIX) do
+					if string.sub(obj.Name, 1, #prefix) == prefix then
+						return true
+					end
+				end
+				return false
+			end
+
+			function Cascade.run(root, opts)
+				if not (root and root.Parent) then
+					return
+				end
+				opts = opts or {}
+				local skipTransparency = opts.skipTransparency == true
+				local animateSelf = opts.animateSelf == true -- source: AnimateSelf - the root moves too, and the start offset is .015 of the screen height in whole pixels
+				local offset = opts.offset
+				if not offset then
+					if animateSelf then
+						local camera = Workspace.CurrentCamera
+						local viewH = camera and camera.ViewportSize.Y or 720
+						offset = UDim2.fromOffset(0, math.floor(0.015 * viewH + 0.5))
+					else
+						offset = UDim2.new(0, 0, 0.15, 0) -- source: StartOffset .15
+					end
+				end
+
+				local list = {}
+				local function collect(parent)
+					for _, child in ipairs(parent:GetChildren()) do
+						if child:IsA("GuiObject") and child.Visible and not skipped(child) then
+							if not LoopDriven[child] then -- a piece with its own looping glow keeps its loop (it still moves with its parent)
+								list[#list + 1] = child
+							end
+							collect(child)
+						end
+					end
+				end
+				collect(root)
+				if animateSelf then
+					table.insert(list, 1, root) -- source: the root is the first piece of the list
+				end
+				if #list == 0 then
+					return
+				end
+
+				local runId = {}
+				for _, obj in ipairs(list) do
+					if not keepRest[obj] then
+						local r = { pos = obj.Position, bg = obj.BackgroundTransparency }
+						if obj:IsA("TextLabel") or obj:IsA("TextButton") or obj:IsA("TextBox") then
+							r.text = obj.TextTransparency
+						end
+						if obj:IsA("ImageLabel") or obj:IsA("ImageButton") then
+							r.image = obj.ImageTransparency
+						end
+						keepRest[obj] = r
+					end
+					owner[obj] = runId
+				end
+
+				-- phase 1: invisible + a little lower (0.15 s)
+				for _, obj in ipairs(list) do
+					local r = keepRest[obj]
+					if not skipTransparency then
+						obj.BackgroundTransparency = 1
+						if r.text then
+							obj.TextTransparency = 1
+						end
+						if r.image then
+							obj.ImageTransparency = 1
+						end
+					end
+					cascadeTS:Create(obj, FAST_OUT, { Position = r.pos + offset }):Play()
+				end
+
+				-- phase 2: one after another, back to the spot with a spring
+				task.delay(0.15, function()
+					for i, obj in ipairs(list) do
+						task.delay(math.min(i - 1, MAX_STAGGER) * DELAY_BETWEEN, function()
+							local r = keepRest[obj]
+							if owner[obj] ~= runId or not obj.Parent or not r then
+								return
+							end
+							local goal = { Position = r.pos }
+							if not skipTransparency then
+								goal.BackgroundTransparency = r.bg
+								if r.text then
+									goal.TextTransparency = r.text
+								end
+								if r.image then
+									goal.ImageTransparency = r.image
+								end
+							end
+							cascadeTS:Create(obj, SPRING, goal):Play()
+						end)
+					end
+					task.delay(math.min(#list, MAX_STAGGER + 1) * DELAY_BETWEEN + 0.7, function()
+						for _, obj in ipairs(list) do
+							if owner[obj] == runId then -- nobody started a newer cascade on it: forget where it belonged
+								owner[obj] = nil
+								keepRest[obj] = nil
+							end
+						end
+					end)
+				end)
+			end
+		end
+
+		-- source: utils:AnimateCascade(button, { AnimateSelf = true, SkipTransparency = true }) - what a tap on the editor's + / star / trash tile runs
+		FX.animateSelf = function(root)
+			Cascade.run(root, { animateSelf = true, skipTransparency = true })
+		end
+
+		local function pageFrame(name)
+			if name == "Home" then
+				return homePage
+			elseif name == "Executor" then
+				return page
+			elseif name == "ScriptHub" then
+				return cloudRefs.page
+			elseif name == "Intelligence" then
+				return intelRefs.page
+			elseif name == "Extensions" then
+				return homeRefs.ext and homeRefs.ext.page
+			elseif name == "Settings" then
+				return homeRefs.settings and homeRefs.settings.page
+			end
+			return nil
+		end
+
 		local function selectTab(name)
 			local index = nil
 			for i, tab in ipairs(TABS) do
@@ -18499,7 +19774,7 @@ do
 			if homeRefs.settings and homeRefs.settings.page then
 				homeRefs.settings.page.Visible = name == "Settings"
 			end
-			showPage(name, animate, direction)
+			showPage(name, false, direction) -- the panels just sit at their spot; the source's cascade (further down) does the animation
 			if name == "Executor" then
 				updateSizes() -- the editor text size (Settings) and the layout are right the moment the page shows
 			end
@@ -18516,27 +19791,26 @@ do
 				task.spawn(cloudRefs.onShow) -- first open starts the ScriptBlox downloads
 			end
 
+			if animate then
+				Cascade.run(pageFrame(name)) -- source: utils:AnimateCascade(nextPage, { ExcludeNames = ... })
+			end
+
 			if indicator then
 				local goal = UDim2.fromScale(0.05, TAB_START_Y - 0.03 + (index - 1) * TAB_STEP)
 				if animate then
-					FX.play(indicator, 0.5, { Position = goal }, Enum.EasingStyle.Back)
+					FX.play(indicator, Theme.SIDE_FX.IndicatorTime, { Position = goal }, Enum.EasingStyle.Quad)
 				else
 					indicator.Position = goal
 				end
-			end
-
-			-- the chosen sidebar icon pops
-			local sideBtn = sidebar:FindFirstChild("SideBtn_" .. name)
-			local sideIcon = sideBtn and sideBtn:FindFirstChildOfClass("ImageLabel")
-			if sideIcon and animate then
-				sideIcon.Size = UDim2.fromScale(0.6, 0.6)
-				FX.play(sideIcon, 0.5, { Size = UDim2.fromScale(0.85, 0.85) }, Enum.EasingStyle.Back)
 			end
 		end
 
 		local previousOnTab = Hooks.OnTab
 		Hooks.OnTab = function(tabName)
 			selectTab(tabName)
+			if main.Visible and windowState == "open" then
+				Cascade.run(sidebar:FindFirstChild("SideBtn_" .. tostring(tabName)), { skipTransparency = true }) -- source: AnimateCascade(SideBtn, { SkipTransparency = true })
+			end
 			if previousOnTab then
 				previousOnTab(tabName)
 			end
@@ -18737,6 +20011,11 @@ do
 			if main:GetAttribute("ArcyInstantOpen") then -- the window is faded while "Instant code with Arcy" is open
 				return
 			end
+			if not Theme.SIDE_FX.Breath then
+				indicatorBreath.Scale = 1
+				indicator.ImageTransparency = 0
+				return
+			end
 			breathTimer = breathTimer + dt
 			if breathTimer < (1 / 30) * Theme.Perf.scale then
 				return -- PERFORMANCE: a slow breathing glow looks the same at 30 updates a second and costs half as much as every frame
@@ -18804,6 +20083,7 @@ do
 					FX.play(list, 0.35, { CanvasPosition = Vector2.new(0, maxY) })
 				end
 			end)
+			return target -- the file (name / source ...), so the code that opened it can fill it in later (Arcy's AI Script file)
 		end
 
 		-- a file that Editor tabs were opened from was renamed (newPath) or deleted (newPath = nil)
@@ -18820,6 +20100,32 @@ do
 		selectItem(items[2] or items[1], true)
 		selectTab(START_TAB)
 		task.defer(updateSizes)
+
+		-- Credit Owner watchdog: every second the Editor file, every 2 seconds the real file, is checked against the encoded data and put back if anything changed it
+		task.spawn(function()
+			local beat = 0
+			while alive do
+				task.wait(1)
+				beat = beat + 1
+				if beat % 2 == 0 then
+					pcall(creditFileEnsure) -- the real file is written again within 2 seconds if it was deleted or changed
+				end
+				local okG, changed = pcall(creditGuard)
+				if not okG then
+					creditStop()
+					return
+				end
+				if changed and alive then
+					if selected and selected.locked then
+						loading = true
+						codeBox.Text = selected.source
+						loading = false
+						refreshView()
+					end
+					pcall(refreshList)
+				end
+			end
+		end)
 
 		-- auto-executed scripts run once when the UI is built (this script runs nothing itself - Hooks.OnRun does the work)
 		task.defer(function()
@@ -18876,7 +20182,7 @@ do
 		bgImage.ImageTransparency = 1
 		main.Visible = true
 		tween(main, 0.3, { BackgroundTransparency = Theme.MainBgTransparency })
-		tween(bgImage, 0.3, { ImageTransparency = BG_IMAGE_TRANSPARENCY })
+		tween(bgImage, 0.3, { ImageTransparency = Theme.MainBgImageTransparency })
 		TweenService:Create(popScale, TweenInfo.new(0.55, BACK, OUT), { Scale = 1 }):Play()
 		TweenService:Create(sidebar, TweenInfo.new(0.5, BACK, OUT, 0, false, 0.1), { Position = sidebarFinal }):Play()
 		for i, p in ipairs(pieces) do
@@ -18901,7 +20207,7 @@ do
 			)
 			main.Visible = true
 			main.BackgroundTransparency = Theme.MainBgTransparency
-			bgImage.ImageTransparency = BG_IMAGE_TRANSPARENCY
+			bgImage.ImageTransparency = Theme.MainBgImageTransparency
 			popScale.Scale = 1
 		end
 	end)
@@ -18935,4 +20241,3 @@ task.spawn(function()
 		)
 	end
 end)
- 
